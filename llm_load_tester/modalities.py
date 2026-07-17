@@ -49,6 +49,11 @@ class ModalityHandler(ABC):
         endpoint = str(config.get("endpoint", ""))
         return "moonshot.ai" in endpoint or "moonshot.cn" in endpoint
 
+    def is_modelarts_maas_endpoint(self, config: dict[str, Any]) -> bool:
+        """Check whether the request targets Huawei ModelArts MaaS."""
+        endpoint = str(config.get("endpoint", ""))
+        return "modelarts-maas.com" in endpoint
+
 
 class DirectoryInputHandler(ModalityHandler):
     """Shared directory-based file selection for multimodal inputs."""
@@ -378,23 +383,36 @@ class TextHandler(ModalityHandler):
             prompt = self.generate_random_prompt(input_tokens)
             system_prompt = random.choice(system_prompts)
         
+        output_token_parameter = config.get("output_token_parameter", "max_tokens")
+        if output_token_parameter not in {"max_tokens", "max_completion_tokens"}:
+            raise ValueError(
+                "output_token_parameter must be 'max_tokens' or 'max_completion_tokens'"
+            )
+
         payload = {
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
             ],
-            "max_tokens": output_tokens,
+            output_token_parameter: output_tokens,
             "stream": True,
             "temperature": self.resolve_temperature(
                 config,
                 random.uniform(0.5, 0.9),
             ),
         }
+        thinking_mode = config.get("thinking_mode")
+        if thinking_mode in {"enabled", "disabled"}:
+            payload["thinking"] = {"type": thinking_mode}
+        if self.is_modelarts_maas_endpoint(config):
+            payload["stream_options"] = {"include_usage": True}
         
         metadata = {
             "input_tokens": input_tokens,
             "max_output_tokens": output_tokens,
+            "output_token_parameter": output_token_parameter,
+            "thinking_mode": thinking_mode or "provider_default",
             "prompt_length_chars": len(prompt),
             "modality": "text"
         }

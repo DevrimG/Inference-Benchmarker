@@ -188,4 +188,12 @@ Enter filename for export [/path/to/Multi-Modal-LLM-Benchmark/benchmarks/llm_ben
 
 4. **Image/Voice**: Put your test files in `images/` and `sound/` or point the tool at other folders. Files are reused from a shuffled pool when requests exceed file count.
 
-5. **Export**: JSON includes full summary + per-request metrics; CSV includes only per-request metrics.
+5. **Responsiveness metric**: Streaming token-bearing responses use TTFT as the primary metric. Buffered responses use TTFB; the tool does not treat a completed buffered JSON response as a first token.
+
+6. **Optional `/metrics` capture**: Enable it when prompted to sample vLLM/Prometheus metrics before, during, and after the measured requests. Warm-up activity is excluded from the server-metric deltas.
+
+7. **GLM/ModelArts**: For a ModelArts MaaS endpoint, prefer `max_completion_tokens` when the limit should include reasoning. TTFT begins at the first reasoning or visible-text token; time to first visible text remains separate. Provider timestamps are metadata, not TTFT durations.
+
+8. **ModelArts monitoring**: MaaS has no public vLLM `/metrics` endpoint. The optional Cloud Eye adapter needs a separate IAM token, project ID, and MaaS dimension, and returns one-minute aggregated metrics.
+
+9. **Export**: JSON includes the summary, per-request metrics, and optional monitoring. CSV exports add `.vllm_metrics.*` and/or `.modelarts_metrics.*` sidecars when collection is enabled.

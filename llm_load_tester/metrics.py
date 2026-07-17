@@ -48,7 +48,15 @@ class RequestMetrics:
     """Metrics for a single request."""
     request_id: int
     start_time: float
+    headers_received_time: float | None = None
+    first_byte_time: float | None = None
+    first_event_time: float | None = None
+    first_output_time: float | None = None
     first_token_time: float | None = None
+    first_reasoning_time: float | None = None
+    first_text_time: float | None = None
+    first_tool_call_time: float | None = None
+    first_audio_time: float | None = None
     end_time: float | None = None
     tokens_generated: int = 0
     input_tokens: int = 0
@@ -56,20 +64,121 @@ class RequestMetrics:
     error_message: str = ""
     status_code: int | None = None
     response_content: str = ""
+    reasoning_content: str = ""
+    upstream_request_id: str | None = None
+    upstream_span_id: str | None = None
+    provider_response_id: str | None = None
+    provider_model: str | None = None
+    provider_object: str | None = None
+    provider_service_tier: str | None = None
+    provider_created: float | None = None
+    provider_first_token_return_time: float | None = None
+    provider_last_token_return_time: float | None = None
+    provider_usage: dict[str, Any] = field(default_factory=dict)
+    finish_reason: str | None = None
+    first_output_kind: str | None = None
+    response_mode: str | None = None
+    response_content_type: str = ""
+    token_count_source: str = "character_estimate"
+
+    @property
+    def ttfb(self) -> float | None:
+        """Client-observed time to first non-empty response-body byte."""
+        if self.first_byte_time is not None:
+            return self.first_byte_time - self.start_time
+        return None
+
+    @property
+    def time_to_first_event(self) -> float | None:
+        """Time to the first complete SSE data event."""
+        if self.first_event_time is not None:
+            return self.first_event_time - self.start_time
+        return None
+
+    @property
+    def time_to_first_output(self) -> float | None:
+        """Time to the first identifiable output-bearing response object."""
+        if self.first_output_time is not None:
+            return self.first_output_time - self.start_time
+        return None
+
+    @property
+    def time_to_first_reasoning(self) -> float | None:
+        if self.first_reasoning_time is not None:
+            return self.first_reasoning_time - self.start_time
+        return None
+
+    @property
+    def time_to_first_text(self) -> float | None:
+        if self.first_text_time is not None:
+            return self.first_text_time - self.start_time
+        return None
+
+    @property
+    def time_to_first_tool_call(self) -> float | None:
+        if self.first_tool_call_time is not None:
+            return self.first_tool_call_time - self.start_time
+        return None
+
+    @property
+    def time_to_first_audio(self) -> float | None:
+        if self.first_audio_time is not None:
+            return self.first_audio_time - self.start_time
+        return None
     
     @property
     def ttft(self) -> float | None:
-        """Time To First Token in seconds."""
-        if self.first_token_time and self.start_time:
+        """Time to first identifiable token-bearing streamed output."""
+        if self.first_token_time is not None:
             return self.first_token_time - self.start_time
         return None
     
     @property
     def total_latency(self) -> float | None:
-        """Total end-to-end latency in seconds."""
-        if self.end_time and self.start_time:
+        """Client-observed total request latency in seconds."""
+        if self.end_time is not None:
             return self.end_time - self.start_time
         return None
+
+    @property
+    def responsiveness_metric_type(self) -> str:
+        """Primary comparable responsiveness metric selected from response evidence."""
+        if self.response_mode == "streaming" and self.ttft is not None:
+            return "ttft"
+        if self.ttfb is not None:
+            return "ttfb"
+        if self.ttft is not None:
+            return "ttft"
+        return "unavailable"
+
+    @property
+    def available_responsiveness_metrics(self) -> list[str]:
+        available: list[str] = []
+        if self.ttfb is not None:
+            available.append("ttfb")
+        if self.ttft is not None:
+            available.append("ttft")
+        return available
+
+    @property
+    def provider_stream_return_span(self) -> float | None:
+        """Provider timestamp span across returned chunks; not a TTFT measurement."""
+        if (
+            self.provider_first_token_return_time is not None
+            and self.provider_last_token_return_time is not None
+        ):
+            return self.provider_last_token_return_time - self.provider_first_token_return_time
+        return None
+
+    @property
+    def measurement_basis(self) -> str:
+        if self.response_mode == "streaming" and self.ttft is not None:
+            return "streamed_token_bearing_delta"
+        if self.response_mode == "buffered" and self.ttfb is not None:
+            return "buffered_response_ttfb_only"
+        if self.ttfb is not None:
+            return "response_body_bytes"
+        return "unavailable"
     
     @property
     def tpot(self) -> float | None:
@@ -92,19 +201,61 @@ class RequestMetrics:
         """Convert to dictionary for export."""
         return {
             "request_id": self.request_id,
+            "upstream_request_id": self.upstream_request_id,
+            "upstream_span_id": self.upstream_span_id,
+            "provider_response_id": self.provider_response_id,
+            "provider_model": self.provider_model,
+            "provider_object": self.provider_object,
+            "provider_service_tier": self.provider_service_tier,
+            "provider_created": self.provider_created,
+            "provider_first_token_return_time": self.provider_first_token_return_time,
+            "provider_last_token_return_time": self.provider_last_token_return_time,
+            "provider_stream_return_span_seconds": self.provider_stream_return_span,
+            "provider_timestamp_note": (
+                "Provider absolute chunk-return timestamps; not client or server TTFT."
+                if self.provider_first_token_return_time is not None
+                else None
+            ),
+            "provider_usage": self.provider_usage,
+            "finish_reason": self.finish_reason,
             "start_time": self.start_time,
+            "headers_received_time": self.headers_received_time,
+            "first_byte_time": self.first_byte_time,
+            "first_event_time": self.first_event_time,
+            "first_output_time": self.first_output_time,
             "first_token_time": self.first_token_time,
+            "first_reasoning_time": self.first_reasoning_time,
+            "first_text_time": self.first_text_time,
+            "first_tool_call_time": self.first_tool_call_time,
+            "first_audio_time": self.first_audio_time,
             "end_time": self.end_time,
+            "client_observed_ttfb_seconds": self.ttfb,
+            "client_observed_time_to_first_event_seconds": self.time_to_first_event,
+            "client_observed_time_to_first_output_seconds": self.time_to_first_output,
+            "client_observed_ttft_seconds": self.ttft,
             "ttft_seconds": self.ttft,
+            "client_observed_time_to_first_reasoning_seconds": self.time_to_first_reasoning,
+            "client_observed_time_to_first_text_seconds": self.time_to_first_text,
+            "client_observed_time_to_first_tool_call_seconds": self.time_to_first_tool_call,
+            "client_observed_time_to_first_audio_seconds": self.time_to_first_audio,
+            "client_observed_latency_seconds": self.total_latency,
             "total_latency_seconds": self.total_latency,
             "tpot_seconds": self.tpot,
             "tokens_generated": self.tokens_generated,
             "input_tokens": self.input_tokens,
             "tokens_per_second": self.tokens_per_second,
+            "token_count_source": self.token_count_source,
+            "responsiveness_metric_type": self.responsiveness_metric_type,
+            "available_responsiveness_metrics": self.available_responsiveness_metrics,
+            "measurement_basis": self.measurement_basis,
+            "first_output_kind": self.first_output_kind,
+            "response_mode": self.response_mode,
+            "response_content_type": self.response_content_type,
             "error": self.error.value,
             "error_message": self.error_message,
             "status_code": self.status_code,
-            "response_content": self.response_content
+            "response_content": self.response_content,
+            "reasoning_content": self.reasoning_content,
         }
 
 
@@ -127,6 +278,8 @@ class BenchmarkResult:
     # Text modality configuration
     input_tokens: int | None = None
     output_tokens: int | None = None
+    output_token_parameter: str | None = None
+    thinking_mode: str | None = None
     
     # Image modality configuration
     image_directory: str | None = None
@@ -137,6 +290,8 @@ class BenchmarkResult:
     
     # Raw metrics
     request_metrics: list[RequestMetrics] = field(default_factory=list)
+    server_metrics: dict[str, Any] | None = None
+    provider_monitoring: dict[str, Any] | None = None
     
     # Error tracking
     errors: dict[ErrorCategory, int] = field(default_factory=lambda: {
@@ -179,7 +334,20 @@ class BenchmarkResult:
     def get_summary(self) -> dict[str, Any]:
         """Generate a summary of benchmark results."""
         # Collect all valid values
-        ttfts = self._get_valid_values(lambda m: m.ttft)
+        successful_metrics = [
+            metric for metric in self.request_metrics if metric.error == ErrorCategory.NONE
+        ]
+        client_ttfbs = [
+            value for metric in successful_metrics if (value := metric.ttfb) is not None
+        ]
+        client_ttfts = [
+            value for metric in successful_metrics if (value := metric.ttft) is not None
+        ]
+        client_first_text = [
+            value
+            for metric in successful_metrics
+            if (value := metric.time_to_first_text) is not None
+        ]
         latencies = self._get_valid_values(lambda m: m.total_latency)
         tpots = self._get_valid_values(lambda m: m.tpot)
         tps_per_req = self._get_valid_values(lambda m: m.tokens_per_second)
@@ -187,6 +355,20 @@ class BenchmarkResult:
         # Total tokens
         total_output_tokens = sum(m.tokens_generated for m in self.request_metrics)
         total_input_tokens = sum(m.input_tokens for m in self.request_metrics)
+        total_reasoning_tokens = sum(
+            int(
+                ((m.provider_usage.get("completion_tokens_details") or {}).get("reasoning_tokens"))
+                or 0
+            )
+            for m in self.request_metrics
+        )
+        total_cached_input_tokens = sum(
+            int(
+                ((m.provider_usage.get("prompt_tokens_details") or {}).get("cached_tokens"))
+                or 0
+            )
+            for m in self.request_metrics
+        )
         
         # Overall duration
         duration_seconds = None
@@ -197,6 +379,34 @@ class BenchmarkResult:
         overall_tps = None
         if duration_seconds and duration_seconds > 0:
             overall_tps = total_output_tokens / duration_seconds
+
+        successful_count = self.successful_requests
+        ttfb_coverage = (len(client_ttfbs) / successful_count * 100) if successful_count else 0.0
+        ttft_coverage = (len(client_ttfts) / successful_count * 100) if successful_count else 0.0
+        primary_metric_types = {
+            metric.responsiveness_metric_type for metric in successful_metrics
+        }
+        primary_metric_types.discard("unavailable")
+        if len(primary_metric_types) == 1:
+            responsiveness_type = next(iter(primary_metric_types))
+        elif len(primary_metric_types) > 1:
+            responsiveness_type = "mixed"
+        else:
+            responsiveness_type = "unavailable"
+
+        provider_histograms = (
+            ((self.server_metrics or {}).get("summary") or {}).get("histograms") or {}
+        )
+        provider_ttft = provider_histograms.get("ttft") or {}
+        provider_ttfb = provider_histograms.get("ttfb") or {}
+        if provider_ttft and provider_ttfb:
+            provider_responsiveness_type = "both"
+        elif provider_ttft:
+            provider_responsiveness_type = "ttft"
+        elif provider_ttfb:
+            provider_responsiveness_type = "ttfb"
+        else:
+            provider_responsiveness_type = "unavailable"
         
         summary = {
             # Configuration
@@ -212,6 +422,8 @@ class BenchmarkResult:
             # Modality-specific configuration
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
+            "output_token_parameter": self.output_token_parameter,
+            "thinking_mode": self.thinking_mode,
             "image_directory": self.image_directory,
             "audio_directory": self.audio_directory,
             "audio_file": self.audio_file,
@@ -230,14 +442,55 @@ class BenchmarkResult:
             "total_input_tokens": total_input_tokens,
             "total_output_tokens": total_output_tokens,
             "total_tokens": total_input_tokens + total_output_tokens,
+            "total_reasoning_tokens": total_reasoning_tokens,
+            "total_cached_input_tokens": total_cached_input_tokens,
+
+            # Responsiveness metric availability
+            "responsiveness_metric_type": responsiveness_type,
+            "provider_responsiveness_metric_type": provider_responsiveness_type,
+            "ttfb_coverage_percent": round(ttfb_coverage, 2),
+            "ttft_coverage_percent": round(ttft_coverage, 2),
+
+            # Client-observed TTFB
+            "client_observed_ttfb_mean": round(statistics.mean(client_ttfbs), 3) if client_ttfbs else None,
+            "client_observed_ttfb_p50": round(statistics.median(client_ttfbs), 3) if client_ttfbs else None,
+            "client_observed_ttfb_p95": round(self._calculate_percentile(client_ttfbs, 95), 3) if client_ttfbs else None,
+            "client_observed_ttfb_p99": round(self._calculate_percentile(client_ttfbs, 99), 3) if client_ttfbs else None,
+            "client_observed_ttfb_min": round(min(client_ttfbs), 3) if client_ttfbs else None,
+            "client_observed_ttfb_max": round(max(client_ttfbs), 3) if client_ttfbs else None,
             
-            # TTFT (Time To First Token)
-            "ttft_mean": round(statistics.mean(ttfts), 3) if ttfts else None,
-            "ttft_p50": round(statistics.median(ttfts), 3) if ttfts else None,
-            "ttft_p95": round(self._calculate_percentile(ttfts, 95), 3) if ttfts else None,
-            "ttft_p99": round(self._calculate_percentile(ttfts, 99), 3) if ttfts else None,
-            "ttft_min": round(min(ttfts), 3) if ttfts else None,
-            "ttft_max": round(max(ttfts), 3) if ttfts else None,
+            # Client-observed TTFT. This includes client->gateway transit,
+            # provider edge/gateway handling, server-side queueing, and any
+            # buffering before the first streamed text chunk reaches the client.
+            "client_observed_ttft_mean": round(statistics.mean(client_ttfts), 3) if client_ttfts else None,
+            "client_observed_ttft_p50": round(statistics.median(client_ttfts), 3) if client_ttfts else None,
+            "client_observed_ttft_p95": round(self._calculate_percentile(client_ttfts, 95), 3) if client_ttfts else None,
+            "client_observed_ttft_p99": round(self._calculate_percentile(client_ttfts, 99), 3) if client_ttfts else None,
+            "client_observed_ttft_min": round(min(client_ttfts), 3) if client_ttfts else None,
+            "client_observed_ttft_max": round(max(client_ttfts), 3) if client_ttfts else None,
+            "client_observed_time_to_first_text_mean": round(statistics.mean(client_first_text), 3) if client_first_text else None,
+            "provider_internal_ttft_mean": provider_ttft.get("mean"),
+            "provider_internal_ttft_p50": provider_ttft.get("p50"),
+            "provider_internal_ttft_p95": provider_ttft.get("p95"),
+            "provider_internal_ttft_p99": provider_ttft.get("p99"),
+            "provider_internal_ttft_source": provider_ttft.get("source_metrics"),
+            "provider_internal_ttft_note": (
+                "Scenario-level histogram delta from the server metrics endpoint."
+                if provider_ttft
+                else "Not available from the configured server metrics endpoint."
+            ),
+            "provider_internal_ttfb_mean": provider_ttfb.get("mean"),
+            "provider_internal_ttfb_p50": provider_ttfb.get("p50"),
+            "provider_internal_ttfb_p95": provider_ttfb.get("p95"),
+            "provider_internal_ttfb_p99": provider_ttfb.get("p99"),
+            "provider_internal_ttfb_source": provider_ttfb.get("source_metrics"),
+            # Backward-compatible aliases. Prefer client_observed_ttft_* in new reports.
+            "ttft_mean": round(statistics.mean(client_ttfts), 3) if client_ttfts else None,
+            "ttft_p50": round(statistics.median(client_ttfts), 3) if client_ttfts else None,
+            "ttft_p95": round(self._calculate_percentile(client_ttfts, 95), 3) if client_ttfts else None,
+            "ttft_p99": round(self._calculate_percentile(client_ttfts, 99), 3) if client_ttfts else None,
+            "ttft_min": round(min(client_ttfts), 3) if client_ttfts else None,
+            "ttft_max": round(max(client_ttfts), 3) if client_ttfts else None,
             
             # End-to-End Latency
             "latency_mean": round(statistics.mean(latencies), 3) if latencies else None,
@@ -292,6 +545,10 @@ class BenchmarkResult:
                 table.add_row("  Input Tokens", str(summary["input_tokens"]))
             if summary["output_tokens"]:
                 table.add_row("  Output Tokens", str(summary["output_tokens"]))
+            if summary["output_token_parameter"]:
+                table.add_row("  Output Limit Field", summary["output_token_parameter"])
+            if summary["thinking_mode"]:
+                table.add_row("  Thinking Mode", summary["thinking_mode"])
         elif summary["modality"] == "image" and summary["image_directory"]:
             table.add_row("  Image Directory", summary["image_directory"])
         elif summary["modality"] == "voice":
@@ -309,17 +566,76 @@ class BenchmarkResult:
         table.add_row("  Failed Requests", str(summary["failed_requests"]))
         table.add_row("  Error Rate", f"{summary['error_rate_percent']:.2f}%")
         table.add_row("  Total Output Tokens", str(summary["total_output_tokens"]))
+        if summary["total_reasoning_tokens"]:
+            table.add_row("  Reasoning Tokens", str(summary["total_reasoning_tokens"]))
+        if summary["total_cached_input_tokens"]:
+            table.add_row("  Cached Input Tokens", str(summary["total_cached_input_tokens"]))
         table.add_row("  Overall Throughput", f"{summary['overall_tokens_per_second']:.2f} tok/s" if summary["overall_tokens_per_second"] else "N/A")
         table.add_row("", "")
         
-        # TTFT section
-        table.add_row("[bold]Time To First Token (TTFT)[/bold]", "")
-        table.add_row("  Mean", f"{summary['ttft_mean']:.3f}s" if summary["ttft_mean"] else "N/A")
-        table.add_row("  p50", f"{summary['ttft_p50']:.3f}s" if summary["ttft_p50"] else "N/A")
-        table.add_row("  p95", f"{summary['ttft_p95']:.3f}s" if summary["ttft_p95"] else "N/A")
-        table.add_row("  p99", f"{summary['ttft_p99']:.3f}s" if summary["ttft_p99"] else "N/A")
-        table.add_row("  Range", f"{summary['ttft_min']:.3f}s - {summary['ttft_max']:.3f}s" if summary["ttft_min"] else "N/A")
+        # Client-observed responsiveness sections
+        table.add_row("[bold]Responsiveness Classification[/bold]", summary["responsiveness_metric_type"])
+        table.add_row("  TTFB Coverage", f"{summary['ttfb_coverage_percent']:.2f}%")
+        table.add_row("  TTFT Coverage", f"{summary['ttft_coverage_percent']:.2f}%")
         table.add_row("", "")
+
+        table.add_row("[bold]Client-Observed Time To First Byte (TTFB)[/bold]", "")
+        table.add_row("  Mean", f"{summary['client_observed_ttfb_mean']:.3f}s" if summary["client_observed_ttfb_mean"] is not None else "N/A")
+        table.add_row("  p50", f"{summary['client_observed_ttfb_p50']:.3f}s" if summary["client_observed_ttfb_p50"] is not None else "N/A")
+        table.add_row("  p95", f"{summary['client_observed_ttfb_p95']:.3f}s" if summary["client_observed_ttfb_p95"] is not None else "N/A")
+        table.add_row("  p99", f"{summary['client_observed_ttfb_p99']:.3f}s" if summary["client_observed_ttfb_p99"] is not None else "N/A")
+        table.add_row("  Scope", "Client request start -> first non-empty response-body byte")
+        table.add_row("", "")
+
+        table.add_row("[bold]Client-Observed Time To First Token (TTFT)[/bold]", "")
+        table.add_row("  Mean", f"{summary['client_observed_ttft_mean']:.3f}s" if summary["client_observed_ttft_mean"] else "N/A")
+        table.add_row("  p50", f"{summary['client_observed_ttft_p50']:.3f}s" if summary["client_observed_ttft_p50"] else "N/A")
+        table.add_row("  p95", f"{summary['client_observed_ttft_p95']:.3f}s" if summary["client_observed_ttft_p95"] else "N/A")
+        table.add_row("  p99", f"{summary['client_observed_ttft_p99']:.3f}s" if summary["client_observed_ttft_p99"] else "N/A")
+        table.add_row("  Range", f"{summary['client_observed_ttft_min']:.3f}s - {summary['client_observed_ttft_max']:.3f}s" if summary["client_observed_ttft_min"] else "N/A")
+        table.add_row("  Scope", "Client request start -> first token-bearing streamed output")
+        table.add_row("  First Visible Text Mean", f"{summary['client_observed_time_to_first_text_mean']:.3f}s" if summary["client_observed_time_to_first_text_mean"] is not None else "N/A")
+        provider_ttft = summary["provider_internal_ttft_mean"]
+        table.add_row(
+            "[bold]Provider-Internal TTFT[/bold]",
+            f"{provider_ttft:.3f}s mean" if provider_ttft is not None else "Not available",
+        )
+        provider_ttfb = summary["provider_internal_ttfb_mean"]
+        table.add_row(
+            "[bold]Provider-Internal TTFB[/bold]",
+            f"{provider_ttfb:.3f}s mean" if provider_ttfb is not None else "Not available",
+        )
+        table.add_row("", "")
+
+        if self.server_metrics:
+            table.add_row("[bold]Server Metrics Collection[/bold]", "")
+            available = self.server_metrics.get("available", False)
+            has_data = self.server_metrics.get("has_data", False)
+            status = "Available" if available and has_data else "Unavailable"
+            table.add_row("  Status", status)
+            table.add_row("  Scrapes", str(self.server_metrics.get("scrape_count", 0)))
+            errors = self.server_metrics.get("errors", [])
+            if errors:
+                table.add_row("  Collection Error", str(errors[0])[:180])
+            table.add_row("", "")
+
+        if self.provider_monitoring:
+            table.add_row("[bold]Provider Monitoring[/bold]", "")
+            table.add_row(
+                "  Provider", str(self.provider_monitoring.get("provider", "unknown"))
+            )
+            table.add_row(
+                "  Status",
+                "Available" if self.provider_monitoring.get("available") else "Unavailable",
+            )
+            table.add_row(
+                "  Granularity",
+                "Cloud Eye aggregated (1 minute); separate from request timings",
+            )
+            errors = self.provider_monitoring.get("errors", [])
+            if errors:
+                table.add_row("  Collection Error", str(errors[0])[:180])
+            table.add_row("", "")
         
         # Latency section
         table.add_row("[bold]End-to-End Latency[/bold]", "")
@@ -364,7 +680,9 @@ class BenchmarkResult:
         filepath.parent.mkdir(parents=True, exist_ok=True)
         export_data = {
             "summary": self.get_summary(),
-            "raw_metrics": [m.to_dict() for m in self.request_metrics]
+            "raw_metrics": [m.to_dict() for m in self.request_metrics],
+            "server_metrics": self.server_metrics,
+            "provider_monitoring": self.provider_monitoring,
         }
         
         with open(filepath, "w") as f:
@@ -384,3 +702,85 @@ class BenchmarkResult:
             writer.writeheader()
             for metric in self.request_metrics:
                 writer.writerow(metric.to_dict())
+
+        if self.server_metrics:
+            self._export_server_metrics_sidecars(filepath)
+        if self.provider_monitoring:
+            self._export_provider_monitoring_sidecars(filepath)
+
+    def _export_server_metrics_sidecars(self, request_csv_path: Path) -> None:
+        """Export scenario server-metrics summary and time series beside a request CSV."""
+        assert self.server_metrics is not None
+        json_path = request_csv_path.with_name(
+            f"{request_csv_path.stem}.vllm_metrics.json"
+        )
+        with open(json_path, "w") as f:
+            json.dump(self.server_metrics, f, indent=2)
+
+        csv_path = request_csv_path.with_name(
+            f"{request_csv_path.stem}.vllm_metrics.csv"
+        )
+        with open(csv_path, "w", newline="") as f:
+            fieldnames = [
+                "phase",
+                "observed_at",
+                "elapsed_seconds",
+                "metric_name",
+                "metric_type",
+                "labels_json",
+                "value",
+            ]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for snapshot in self.server_metrics.get("snapshots", []):
+                for sample in snapshot.get("samples", []):
+                    writer.writerow({
+                        "phase": snapshot.get("phase"),
+                        "observed_at": snapshot.get("observed_at"),
+                        "elapsed_seconds": snapshot.get("elapsed_seconds"),
+                        "metric_name": sample.get("name"),
+                        "metric_type": sample.get("metric_type"),
+                        "labels_json": json.dumps(sample.get("labels", {}), sort_keys=True),
+                        "value": sample.get("value"),
+                    })
+
+    def _export_provider_monitoring_sidecars(self, request_csv_path: Path) -> None:
+        """Export provider monitoring without mixing it into request-level CSV rows."""
+        assert self.provider_monitoring is not None
+        json_path = request_csv_path.with_name(
+            f"{request_csv_path.stem}.modelarts_metrics.json"
+        )
+        with open(json_path, "w") as f:
+            json.dump(self.provider_monitoring, f, indent=2)
+
+        csv_path = request_csv_path.with_name(
+            f"{request_csv_path.stem}.modelarts_metrics.csv"
+        )
+        with open(csv_path, "w", newline="") as f:
+            fieldnames = [
+                "metric_name",
+                "source_unit",
+                "normalized_unit",
+                "timestamp",
+                "dimensions_json",
+                "values_json",
+            ]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for metric in self.provider_monitoring.get("metrics", []):
+                for datapoint in metric.get("datapoints", []):
+                    values = {
+                        key: value
+                        for key, value in datapoint.items()
+                        if key != "timestamp"
+                    }
+                    writer.writerow({
+                        "metric_name": metric.get("metric_name"),
+                        "source_unit": metric.get("source_unit"),
+                        "normalized_unit": metric.get("unit"),
+                        "timestamp": datapoint.get("timestamp"),
+                        "dimensions_json": json.dumps(
+                            metric.get("dimensions", []), sort_keys=True
+                        ),
+                        "values_json": json.dumps(values, sort_keys=True),
+                    })

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 from rich.console import Console
@@ -519,7 +520,10 @@ def select_request_count() -> int:
     return REQUEST_COUNT_PRESETS[int(choice) - 1]
 
 
-def configure_text_modality() -> dict[str, Any]:
+def configure_text_modality(
+    endpoint: str = "",
+    model: str = "",
+) -> dict[str, Any]:
     """Configure text modality specific settings."""
     config = {"modality": "text"}
     
@@ -529,7 +533,37 @@ def configure_text_modality() -> dict[str, Any]:
     ))
     
     config["input_tokens"] = select_token_length("Select Input Token Length:")
-    config["output_tokens"] = select_token_length("Select Output Token Length (max_tokens):")
+
+    is_modelarts_maas = "modelarts-maas.com" in endpoint
+    if is_modelarts_maas:
+        console.print("\n[bold]Output Token Limit Semantics:[/bold]")
+        console.print("  1. max_completion_tokens - cap reasoning + answer")
+        console.print("  2. max_tokens - cap visible answer only")
+        token_limit_choice = Prompt.ask("Enter choice (1)", choices=["1", "2"], default="1")
+        config["output_token_parameter"] = (
+            "max_completion_tokens" if token_limit_choice == "1" else "max_tokens"
+        )
+        config["output_tokens"] = select_token_length(
+            f"Select Output Token Length ({config['output_token_parameter']}):"
+        )
+
+        console.print("\n[bold]Thinking Mode:[/bold]")
+        console.print("  1. Provider default")
+        console.print("  2. Enabled")
+        console.print("  3. Disabled")
+        thinking_choice = Prompt.ask(
+            "Enter choice (1)", choices=["1", "2", "3"], default="1"
+        )
+        config["thinking_mode"] = {
+            "1": "provider_default",
+            "2": "enabled",
+            "3": "disabled",
+        }[thinking_choice]
+    else:
+        config["output_token_parameter"] = "max_tokens"
+        config["output_tokens"] = select_token_length(
+            "Select Output Token Length (max_tokens):"
+        )
     
     return config
 
@@ -580,6 +614,104 @@ def configure_voice_modality() -> dict[str, Any]:
     return config
 
 
+def configure_server_metrics(
+    endpoint: str,
+    api_key: str | None,
+) -> dict[str, Any]:
+    """Configure optional Prometheus/vLLM scenario metrics collection."""
+    enabled = Confirm.ask(
+        "Collect server metrics from a Prometheus /metrics endpoint?",
+        default=False,
+    )
+    if not enabled:
+        return {
+            "metrics_url": None,
+            "metrics_scrape_interval_seconds": 1.0,
+            "metrics_api_key": None,
+        }
+
+    default_url = f"{endpoint.rstrip('/')}/metrics"
+    metrics_url = Prompt.ask("Metrics endpoint URL", default=default_url).strip()
+    if not metrics_url.startswith(("http://", "https://")):
+        metrics_url = f"http://{metrics_url}"
+
+    while True:
+        scrape_interval = FloatPrompt.ask(
+            "Metrics scrape interval in seconds",
+            default=1.0,
+        )
+        if scrape_interval >= 0.05:
+            break
+        console.print("[red]Scrape interval must be at least 0.05 seconds.[/red]")
+
+    metrics_api_key = None
+    if api_key and Confirm.ask(
+        "Use the API bearer key for the metrics endpoint?",
+        default=True,
+    ):
+        metrics_api_key = api_key
+
+    return {
+        "metrics_url": metrics_url,
+        "metrics_scrape_interval_seconds": scrape_interval,
+        "metrics_api_key": metrics_api_key,
+    }
+
+
+def configure_modelarts_cloud_eye(endpoint: str) -> dict[str, Any]:
+    """Configure optional MaaS monitoring through Huawei Cloud Eye."""
+    console.print(
+        "\n[dim]ModelArts MaaS does not expose public /metrics. "
+        "Its service metrics are queried separately from Cloud Eye.[/dim]"
+    )
+    enabled = Confirm.ask(
+        "Collect aggregated MaaS metrics from Cloud Eye after the benchmark?",
+        default=False,
+    )
+    if not enabled:
+        return {"modelarts_cloud_eye": None}
+
+    hostname = urlparse(endpoint).hostname or ""
+    region = "ap-southeast-1"
+    if hostname.startswith("api-") and ".modelarts-maas.com" in hostname:
+        inferred_region = hostname[4:].split(".modelarts-maas.com", 1)[0]
+        if inferred_region:
+            region = inferred_region
+    default_endpoint = f"https://ces.{region}.myhuaweicloud.com"
+    cloud_eye_endpoint = Prompt.ask(
+        "Cloud Eye API endpoint", default=default_endpoint
+    ).strip()
+    if not cloud_eye_endpoint.startswith(("http://", "https://")):
+        cloud_eye_endpoint = f"https://{cloud_eye_endpoint}"
+    project_id = Prompt.ask("Huawei Cloud project ID").strip()
+    iam_token = Prompt.ask(
+        "Temporary IAM token (not the MaaS inference API key)", password=True
+    ).strip()
+
+    console.print("\n[bold]Cloud Eye MaaS Dimension:[/bold]")
+    console.print("  1. maas_api_id")
+    console.print("  2. maas_service_name")
+    dimension_choice = Prompt.ask("Enter choice (1)", choices=["1", "2"], default="1")
+    dimension_name = "maas_api_id" if dimension_choice == "1" else "maas_service_name"
+    dimension_value = Prompt.ask(f"{dimension_name} value").strip()
+    dimensions: list[tuple[str, str]] = [(dimension_name, dimension_value)]
+    if Confirm.ask("Filter metrics to a specific MaaS API key ID?", default=False):
+        dimensions.append(("maas_key_id", Prompt.ask("maas_key_id value").strip()))
+
+    wait_seconds = FloatPrompt.ask(
+        "Wait for Cloud Eye ingestion before querying (seconds)", default=0.0
+    )
+    return {
+        "modelarts_cloud_eye": {
+            "endpoint": cloud_eye_endpoint,
+            "project_id": project_id,
+            "iam_token": iam_token,
+            "dimensions": tuple(dimensions),
+            "ingestion_wait_seconds": max(0.0, wait_seconds),
+        }
+    }
+
+
 def prompt_export_results() -> tuple[bool, str | None]:
     """Prompt user if they want to export results."""
     console.print()
@@ -594,7 +726,7 @@ def prompt_export_results() -> tuple[bool, str | None]:
     
     console.print("\n[bold]Select Export Format:[/bold]")
     console.print("  1. JSON (includes full raw metrics)")
-    console.print("  2. CSV (raw request metrics only)")
+    console.print("  2. CSV (request metrics + optional vLLM metric sidecars)")
     console.print()
     
     valid_choices = {"1", "2", "json", "csv"}
@@ -657,6 +789,19 @@ def run_interactive_config() -> dict[str, Any]:
     config["endpoint"] = endpoint
     config["api_route"] = api_route
     config["api_key"] = api_key
+
+    # 2b. Provider-specific monitoring. MaaS uses Cloud Eye; self-hosted
+    # engines can expose Prometheus-compatible server metrics directly.
+    if "modelarts-maas.com" in endpoint:
+        config.update({
+            "metrics_url": None,
+            "metrics_scrape_interval_seconds": 1.0,
+            "metrics_api_key": None,
+        })
+        config.update(configure_modelarts_cloud_eye(endpoint))
+    else:
+        config.update(configure_server_metrics(endpoint, api_key))
+        config["modelarts_cloud_eye"] = None
     
     # 3. Model selection (with available models if fetched)
     model = select_model(available_models, provider_name)
@@ -665,7 +810,7 @@ def run_interactive_config() -> dict[str, Any]:
     # 4. Modality-specific configuration
     console.print()
     if modality == "text":
-        modality_config = configure_text_modality()
+        modality_config = configure_text_modality(endpoint, model)
     elif modality == "image":
         modality_config = configure_image_modality()
     elif modality == "voice":

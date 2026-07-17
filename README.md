@@ -7,7 +7,9 @@ Python 3.10+ is required. The examples below use Python 3.12.
 ## Features
 
 - **Multiple Modalities**: Supports Text, Image (multimodal), and Voice inputs
-- **Streaming Metrics**: Accurately measures TTFT, TPOT, and throughput via streaming
+- **Dynamic Responsiveness Metrics**: Measures true body-byte TTFB and reports TTFT only when token-bearing streamed output is observable
+- **vLLM Metrics Capture**: Optionally samples a Prometheus-compatible `/metrics` endpoint before, during, and after each measured scenario
+- **ModelArts MaaS Support**: Captures GLM reasoning/token metadata and can query aggregated `SYS.MaaS` metrics through Cloud Eye
 - **Configurable Load**: Adjustable concurrency, RPS targeting, and request counts
 - **Warm-up Phase**: Pre-test requests to eliminate cold-start latency
 - **Rich Output**: Beautiful terminal tables with detailed metrics
@@ -49,14 +51,101 @@ The interactive CLI will guide you through:
    - Image: Directory path containing images
    - Voice: Directory path containing audio files
 4. **Load Parameters**: Concurrency, target RPS, total requests
+5. **Optional Monitoring**: vLLM `/metrics`, or Cloud Eye for a ModelArts MaaS endpoint
 
 ## Metrics Collected
 
-- **TTFT** (Time To First Token): Latency until first response chunk
+- **TTFB** (Time To First Byte): Client request start until the first non-empty response-body byte
+- **TTFT** (Time To First Token): Client request start until the first identifiable streamed text, reasoning, or tool-call token
+- **First Visible Text**: Kept separate from reasoning-token TTFT for reasoning models
 - **TPOT** (Time Per Output Token): Average generation speed per token
 - **End-to-End Latency**: Total request completion time (p50, p95, p99)
 - **Throughput**: Tokens per second (overall and per-request averages)
 - **Error Rates**: Categorized by HTTP status codes
+
+The primary responsiveness metric is selected from evidence in each response:
+streamed token-bearing output uses TTFT, while a buffered response uses TTFB and
+does not invent a TTFT value. Both raw measurements remain available when both
+can be observed.
+
+For reasoning models, TTFT is the arrival of the first token-bearing output,
+including `reasoning_content`. Time to first visible answer text is retained as a
+separate measurement. `X-Request-Id` and `X-Span-Id` are also captured when the
+provider returns them.
+
+## GLM and ModelArts MaaS Responses
+
+For ModelArts MaaS text requests, the interactive CLI supports both output-limit
+contracts:
+
+- `max_completion_tokens` limits reasoning tokens plus visible answer tokens;
+- `max_tokens` limits the visible answer and excludes chain-of-thought tokens.
+
+Thinking can use the provider default or be explicitly enabled/disabled. The
+runner requests streamed usage data and preserves response metadata including
+model, service tier, finish reason, detailed reasoning/cached token usage, and
+the provider's `first_token_return_time` values.
+
+`first_token_return_time` is stored as provider metadata. It is an absolute
+per-chunk return timestamp, not a TTFT duration, so it is never substituted for
+the client-observed TTFT or TTFB measurements.
+
+## Optional vLLM `/metrics` Collection
+
+Enable server metrics in the interactive prompt and point it at the API server's
+Prometheus endpoint, usually `http://host:port/metrics`. The collector:
+
+- takes a baseline after warm-up and before measured traffic;
+- samples gauges such as running/waiting requests and KV-cache usage during load;
+- takes a final scrape and calculates scenario deltas for counters and histograms;
+- stores the original labeled samples plus canonical summaries for TTFT, TPOT,
+  queue time, token counts, request counts, preemptions, and cache pressure.
+
+Server-internal metrics remain separate from client-observed timings. Standard
+vLLM exposes a TTFT histogram; provider-specific TTFB histograms are reported as
+TTFB only when the endpoint actually exposes one.
+
+JSON exports include a `server_metrics` section. A request CSV export also
+creates `<name>.vllm_metrics.json` and `<name>.vllm_metrics.csv` sidecars when
+server collection is enabled.
+
+## Optional ModelArts Cloud Eye Collection
+
+Public ModelArts MaaS endpoints do not expose the serving engine's Prometheus
+`/metrics` endpoint. When a `modelarts-maas.com` endpoint is selected, the CLI
+can instead query Huawei Cloud Eye after the measured scenario.
+
+This requires a temporary IAM token with `ces:metricData:list`, the regional
+Cloud Eye endpoint, project ID, and either a `maas_api_id` or
+`maas_service_name` dimension. The inference API key and Cloud Eye IAM token are
+different credentials. Neither credential is written to benchmark exports.
+
+Cloud Eye results stay in a separate `provider_monitoring` section because they
+are one-minute aggregates and can include traffic outside the benchmark when a
+dimension is shared. Latency values are normalized from milliseconds to seconds.
+A CSV export adds `<name>.modelarts_metrics.json` and
+`<name>.modelarts_metrics.csv` sidecars.
+
+## Testing Without a GPU
+
+The test suite starts a CPU-only local HTTP server that emulates OpenAI-compatible
+streaming, buffered responses, GLM metadata, a changing vLLM-style `/metrics`
+endpoint, and the Cloud Eye batch-query contract:
+
+```bash
+python -m unittest discover -v
+```
+
+This validates collection and timing semantics without loading a model. A short
+smoke run against real vLLM is still recommended once GPU access is available,
+because metric availability can vary by vLLM/provider version.
+
+The base benchmark can still run when the optional Prometheus parser is absent.
+To enable `/metrics` collection, install the full project requirements first:
+
+```bash
+python3.12 -m pip install -r requirements.txt
+```
 
 ## Project Structure
 

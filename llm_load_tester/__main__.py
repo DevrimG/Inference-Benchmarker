@@ -16,6 +16,7 @@ from .cli import (
 )
 from .benchmarker import LLMBenchmarker, LoadTestConfig
 from .modalities import get_handler
+from .modelarts_monitoring import ModelArtsCloudEyeConfig
 
 
 def main() -> int:
@@ -28,6 +29,12 @@ def main() -> int:
         modality_handler = get_handler(config_dict["modality"])
         
         # Build load test configuration
+        cloud_eye_settings = config_dict.get("modelarts_cloud_eye")
+        cloud_eye_config = (
+            ModelArtsCloudEyeConfig(**cloud_eye_settings)
+            if cloud_eye_settings
+            else None
+        )
         load_config = LoadTestConfig(
             endpoint=config_dict["endpoint"],
             api_route=config_dict["api_route"],
@@ -38,7 +45,13 @@ def main() -> int:
             total_requests=config_dict["total_requests"],
             warmup_requests=config_dict["warmup_requests"],
             modality_handler=modality_handler,
-            modality_config=config_dict["modality_config"]
+            modality_config=config_dict["modality_config"],
+            metrics_url=config_dict.get("metrics_url"),
+            metrics_scrape_interval_seconds=config_dict.get(
+                "metrics_scrape_interval_seconds", 1.0
+            ),
+            metrics_api_key=config_dict.get("metrics_api_key"),
+            modelarts_cloud_eye=cloud_eye_config,
         )
         
         # Run the benchmark

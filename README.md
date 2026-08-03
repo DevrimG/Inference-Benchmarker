@@ -13,7 +13,7 @@ Python 3.10+ is required. The examples below use Python 3.12.
 - **Configurable Load**: Adjustable concurrency, RPS targeting, and request counts
 - **Warm-up Phase**: Pre-test requests to eliminate cold-start latency
 - **Rich Output**: Beautiful terminal tables with detailed metrics
-- **Data Export**: Export results to JSON or CSV for further analysis
+- **Data Export**: Export results to JSON or one formatted Excel workbook
 
 ## Installation
 
@@ -105,9 +105,20 @@ Server-internal metrics remain separate from client-observed timings. Standard
 vLLM exposes a TTFT histogram; provider-specific TTFB histograms are reported as
 TTFB only when the endpoint actually exposes one.
 
-JSON exports include a `server_metrics` section. A request CSV export also
-creates `<name>.vllm_metrics.json` and `<name>.vllm_metrics.csv` sidecars when
-server collection is enabled.
+JSON exports include a `server_metrics` section. Excel exports keep everything
+in one `.xlsx` file with `Benchmark Summary`, `Requests`, `vLLM Summary`,
+`vLLM Timeline`, and `Request Context` sheets. The request-context sheet aligns
+each client request window with nearby server gauge scrapes. These values are
+contextual observations, not exact Prometheus attribution to an individual
+request. Exact request-level queue/prefill/decode attribution requires logs or
+traces carrying request IDs.
+
+The benchmark summary includes an explicit unit beside every numeric metric,
+such as `seconds`, `percent`, `tokens`, or `tokens/second`. JSON exports provide
+the same additive metadata in `summary_units` while preserving existing keys.
+
+The programmatic `BenchmarkResult.export_csv()` method remains available for
+backward compatibility and continues to create vLLM metric sidecars.
 
 ## Optional ModelArts Cloud Eye Collection
 
@@ -123,8 +134,8 @@ different credentials. Neither credential is written to benchmark exports.
 Cloud Eye results stay in a separate `provider_monitoring` section because they
 are one-minute aggregates and can include traffic outside the benchmark when a
 dimension is shared. Latency values are normalized from milliseconds to seconds.
-A CSV export adds `<name>.modelarts_metrics.json` and
-`<name>.modelarts_metrics.csv` sidecars.
+Excel exports add a `ModelArts Metrics` sheet to the same workbook. The legacy
+programmatic CSV export continues to create ModelArts sidecars.
 
 ## Testing Without a GPU
 
@@ -174,7 +185,7 @@ python -m llm_load_tester
 # 6. Configure load (e.g., 8 concurrent, 5 RPS, 100 requests)
 # 7. Wait for warm-up and benchmark completion
 # 8. View results table in terminal
-# 9. Optionally export to JSON/CSV
+# 9. Optionally export to JSON or Excel
 ```
 
 ## API Compatibility

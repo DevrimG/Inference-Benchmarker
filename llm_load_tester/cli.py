@@ -726,20 +726,20 @@ def prompt_export_results() -> tuple[bool, str | None]:
     
     console.print("\n[bold]Select Export Format:[/bold]")
     console.print("  1. JSON (includes full raw metrics)")
-    console.print("  2. CSV (request metrics + optional vLLM metric sidecars)")
+    console.print("  2. Excel workbook (requests and monitoring in separate sheets)")
     console.print()
     
-    valid_choices = {"1", "2", "json", "csv"}
+    valid_choices = {"1", "2", "json", "xlsx", "excel"}
     while True:
         format_choice = Prompt.ask("Enter choice (1)", default="1").lower()
         if format_choice in valid_choices:
             break
-        console.print("[red]Invalid choice. Please enter 1, 2, json, or csv.[/red]")
+        console.print("[red]Invalid choice. Please enter 1, 2, json, xlsx, or excel.[/red]")
     
     if format_choice in ("1", "json"):
         return True, "json"
     else:
-        return True, "csv"
+        return True, "xlsx"
 
 
 def get_export_filename(format_type: str) -> str:

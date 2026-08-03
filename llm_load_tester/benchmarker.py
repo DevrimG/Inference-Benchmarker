@@ -655,6 +655,7 @@ class LLMBenchmarker:
                 await server_collector.start(session)
 
             # Only the measured request interval contributes to aggregate throughput.
+            self.result.scenario_start_monotonic = time.monotonic()
             self.result.start_time = datetime.now()
             scenario_start_epoch_ms = int(time.time() * 1000)
             
@@ -686,7 +687,9 @@ class LLMBenchmarker:
                     scenario_end_epoch_ms = int(time.time() * 1000)
                     if server_collector is not None:
                         await server_collector.stop(session)
-                        self.result.server_metrics = server_collector.to_dict()
+                        self.result.server_metrics = server_collector.to_dict(
+                            self.result.scenario_start_monotonic
+                        )
                     if self.config.modelarts_cloud_eye is not None:
                         cloud_eye_collector = ModelArtsCloudEyeCollector(
                             self.config.modelarts_cloud_eye

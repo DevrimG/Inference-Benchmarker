@@ -165,7 +165,7 @@ Would you like to export the results to a file? [y/n]: y
 
 Select Export Format:
   1. JSON (includes full raw metrics)
-  2. CSV (raw request metrics only)
+  2. Excel workbook (requests and monitoring in separate sheets)
 
 Enter choice [1]: 1
 Enter filename for export [/path/to/Multi-Modal-LLM-Benchmark/benchmarks/llm_benchmark_20240218_120530.json]: 
@@ -196,4 +196,4 @@ Enter filename for export [/path/to/Multi-Modal-LLM-Benchmark/benchmarks/llm_ben
 
 8. **ModelArts monitoring**: MaaS has no public vLLM `/metrics` endpoint. The optional Cloud Eye adapter needs a separate IAM token, project ID, and MaaS dimension, and returns one-minute aggregated metrics.
 
-9. **Export**: JSON includes the summary, per-request metrics, and optional monitoring. CSV exports add `.vllm_metrics.*` and/or `.modelarts_metrics.*` sidecars when collection is enabled.
+9. **Export**: JSON is best for automation. Excel creates one readable workbook with separate benchmark, request, vLLM summary/timeline, request-context, and optional ModelArts sheets. Request-context server gauges describe the request window but are not exact per-request attribution.

@@ -1,6 +1,6 @@
 """Multi-Modal LLM Benchmark package."""
 
-__version__ = "1.2.0"
+__version__ = "1.3.1"
 __author__ = "Multi-Modal LLM Benchmark"
 
 from .benchmarker import LLMBenchmarker, LoadTestConfig

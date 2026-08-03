@@ -391,6 +391,8 @@ def summarize_snapshots(
                     "prompt_tokens_per_request",
                     "generation_tokens_per_request",
                 }
+                else "seconds/token"
+                if canonical_name == "tpot"
                 else "seconds"
             ),
             "counter_resets": reset_series,
@@ -470,7 +472,10 @@ class ScenarioMetricsCollector:
         await self.scrape(session, "after")
         self.ended_at = datetime.now(timezone.utc)
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(
+        self,
+        elapsed_reference_monotonic: float | None = None,
+    ) -> dict[str, Any]:
         summary, summary_warnings = summarize_snapshots(self.snapshots)
         warnings = [*self.warnings, *summary_warnings]
         has_before = any(snapshot.phase == "before" for snapshot in self.snapshots)
@@ -489,8 +494,18 @@ class ScenarioMetricsCollector:
             "ended_at": self.ended_at.isoformat() if self.ended_at else None,
             "errors": self.errors,
             "warnings": warnings,
+            "elapsed_reference": (
+                "measured_scenario_start"
+                if elapsed_reference_monotonic is not None
+                else "metrics_collection_start"
+            ),
             "summary": summary,
             "snapshots": [
-                snapshot.to_dict(self._start_monotonic) for snapshot in self.snapshots
+                snapshot.to_dict(
+                    elapsed_reference_monotonic
+                    if elapsed_reference_monotonic is not None
+                    else self._start_monotonic
+                )
+                for snapshot in self.snapshots
             ],
         }

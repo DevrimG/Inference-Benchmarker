@@ -8,6 +8,7 @@ from pathlib import Path
 
 import aiohttp
 from aiohttp import web
+from openpyxl import load_workbook
 
 from llm_load_tester.benchmarker import LLMBenchmarker, LoadTestConfig, SSEDecoder
 from llm_load_tester.metrics import ErrorCategory
@@ -302,6 +303,7 @@ vllm:time_to_first_token_seconds_count{{model_name="mock-model"}} {state['ttft_c
         server_metrics = result.server_metrics
         self.assertTrue(server_metrics["available"])
         self.assertGreaterEqual(server_metrics["scrape_count"], 3)
+        self.assertEqual(server_metrics["elapsed_reference"], "measured_scenario_start")
         summary = server_metrics["summary"]
         self.assertEqual(summary["counters"]["generation_tokens"]["delta"], 24.0)
         self.assertEqual(summary["counters"]["prompt_tokens"]["delta"], 8.0)
@@ -321,8 +323,10 @@ vllm:time_to_first_token_seconds_count{{model_name="mock-model"}} {state['ttft_c
         with tempfile.TemporaryDirectory() as directory:
             csv_path = Path(directory) / "result.csv"
             json_path = Path(directory) / "result.json"
+            xlsx_path = Path(directory) / "result.xlsx"
             result.export_csv(csv_path)
             result.export_json(json_path)
+            result.export_xlsx(xlsx_path)
             self.assertTrue(csv_path.exists())
             self.assertTrue((Path(directory) / "result.vllm_metrics.csv").exists())
             self.assertTrue((Path(directory) / "result.vllm_metrics.json").exists())
@@ -331,6 +335,63 @@ vllm:time_to_first_token_seconds_count{{model_name="mock-model"}} {state['ttft_c
             exported = json.loads(json_path.read_text())
             self.assertIn("server_metrics", exported)
             self.assertIn("provider_monitoring", exported)
+            self.assertEqual(
+                exported["summary_units"]["client_observed_ttft_min"],
+                "seconds",
+            )
+            self.assertEqual(
+                exported["summary_units"]["overall_tokens_per_second"],
+                "tokens/second",
+            )
+            self.assertEqual(exported["summary_units"]["tpot_mean"], "seconds/token")
+
+            workbook = load_workbook(xlsx_path, read_only=True, data_only=True)
+            self.assertEqual(
+                workbook.sheetnames,
+                [
+                    "Benchmark Summary",
+                    "Requests",
+                    "vLLM Summary",
+                    "vLLM Timeline",
+                    "Request Context",
+                    "ModelArts Metrics",
+                ],
+            )
+            self.assertEqual(workbook["Requests"].max_row, 3)
+            benchmark_rows = {
+                row[0]: row[1:]
+                for row in workbook["Benchmark Summary"].iter_rows(
+                    min_row=5,
+                    values_only=True,
+                )
+            }
+            self.assertEqual(
+                benchmark_rows["client_observed_ttft_min"][1],
+                "seconds",
+            )
+            self.assertEqual(
+                benchmark_rows["error_rate_percent"][1],
+                "percent",
+            )
+            self.assertEqual(
+                benchmark_rows["overall_tokens_per_second"][1],
+                "tokens/second",
+            )
+            self.assertEqual(benchmark_rows["tpot_mean"][1], "seconds/token")
+            vllm_rows = list(workbook["vLLM Summary"].iter_rows(values_only=True))
+            self.assertIn(
+                ("counter", "generation_tokens", "delta", 24, "tokens"),
+                [row[:5] for row in vllm_rows[1:]],
+            )
+            context_rows = list(workbook["Request Context"].iter_rows(values_only=True))
+            self.assertEqual(len(context_rows), 3)
+            self.assertTrue(
+                all(row[14] in {"within_request_window", "nearest_scrape"} for row in context_rows[1:])
+            )
+            self.assertTrue(
+                all("not metrics attributed" in row[22] for row in context_rows[1:])
+            )
+            workbook.close()
 
     async def test_unavailable_metrics_endpoint_does_not_fail_load_by_default(self) -> None:
         benchmarker = LLMBenchmarker(

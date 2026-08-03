@@ -72,7 +72,9 @@ def main() -> int:
                 filepath.parent.mkdir(parents=True, exist_ok=True)
                 if export_format == "json":
                     result.export_json(filepath)
-                else:
+                elif export_format == "xlsx":
+                    result.export_xlsx(filepath)
+                else:  # Backward-compatible programmatic format.
                     result.export_csv(filepath)
                 
                 console.print(f"[green]✓ Results exported to: {filepath.absolute()}[/green]")

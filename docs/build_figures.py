@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the SVG figures used by docs/USER_MANUAL.md.
+"""Build the SVG figures used by the README (the user manual).
 
     python docs/build_figures.py path/to/r1/results.json
 

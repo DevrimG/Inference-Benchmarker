@@ -14,6 +14,9 @@ from typing import Any, Iterable, Sequence
 from . import stats
 
 QUANTILES = (0.5, 0.9, 0.99)
+# A quantile is only compared when at least this many samples lie beyond it;
+# with fewer, the "p99" of 20 samples is just the maximum.
+MIN_TAIL_SAMPLES = 5
 
 
 def _bucket_for_quantile(
@@ -51,10 +54,15 @@ def bucket_agreement(
         return {"available": False, "reason": "no client samples"}
     checks: dict[str, Any] = {}
     for q in quantiles:
+        key = f"p{q * 100:g}"
+        needed = math.ceil(MIN_TAIL_SAMPLES / (1 - q))
+        if len(client_values) < needed:
+            checks[key] = {"within": None, "reason": f"needs >= {needed} samples"}
+            continue
         bounds = _bucket_for_quantile(histogram["buckets"], q)
         client = stats.percentile(client_values, q * 100)
         within = bounds is not None and client is not None and bounds[0] < client <= bounds[1]
-        checks[f"p{q * 100:g}"] = {
+        checks[key] = {
             "client": client,
             "server_bucket": [bounds[0], "+Inf" if math.isinf(bounds[1]) else bounds[1]]
             if bounds else None,
@@ -66,7 +74,10 @@ def bucket_agreement(
         "server_samples": histogram.get("count_delta"),
         "source_metrics": histogram.get("source_metrics"),
         "quantiles": checks,
-        "all_within": all(check["within"] for check in checks.values()),
+        "all_within": all(
+            check["within"] for check in checks.values() if check["within"] is not None
+        ),
+        "compared_quantiles": [k for k, c in checks.items() if c["within"] is not None],
     }
 
 

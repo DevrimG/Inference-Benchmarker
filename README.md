@@ -157,9 +157,12 @@ python -m pytest
 `llm_load_tester/mock_server.py` is a deterministic OpenAI streaming server with
 configurable per-token cadence, tokens per chunk (to imitate MTP), injected
 stalls, `continuous_usage_stats` usage and a vLLM-named `/metrics` endpoint whose
-counters match what it served. `tests/test_phase3_proof.py` checks that the
-client reproduces that cadence, chunking and stalls, and that its totals and
-percentiles agree with the server's counters and histogram buckets.
+counters match what it served. It can run in-process or, via
+`ProcessMockServer` / `python -m llm_load_tester.mock_server`, as a separate
+process like a real server. `tests/test_phase3_proof.py` uses the separate
+process to check that client gaps match the server's actual write times, that
+the configured cadence, chunking and stalls are reproduced, and that client
+totals and percentiles agree with the server's counters and histogram buckets.
 
 This validates collection and timing semantics without loading a model. A short
 smoke run against real vLLM is still recommended once GPU access is available,

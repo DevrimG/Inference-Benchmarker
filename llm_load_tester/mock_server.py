@@ -16,7 +16,7 @@ import asyncio
 import json
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from aiohttp import web
@@ -41,7 +41,8 @@ E2E_BUCKETS = (
 class MockStreamConfig:
     """Shape of every streamed response.
 
-    Timeline for one request, measured from when the server receives it:
+    Timeline for one request, measured from when the server receives it
+    (after a late write, the next chunk keeps at least half its gap):
 
     * ``request_stalls[n]`` extra seconds before headers for the n-th request
       the server receives (1-based), imitating a queued or slow request.
@@ -164,6 +165,7 @@ class MockOpenAIServer:
         app.router.add_get("/v1/models", self._models)
         app.router.add_get("/version", self._version)
         app.router.add_get("/metrics", self._metrics)
+        app.router.add_get("/_mock/records", self._records)
         return app
 
     async def start(self) -> str:
@@ -267,7 +269,13 @@ class MockOpenAIServer:
             previous_chunk_at: float | None = None
             emitted_visible = 0
             for index, (size, offset) in enumerate(zip(sizes, offsets)):
-                delay = stream_start + offset - time.monotonic()
+                # Absolute schedule keeps the average cadence exact. After a
+                # late write, catch up but keep at least half a gap between
+                # writes so two chunks never coalesce into one client read.
+                due = stream_start + offset
+                if previous_chunk_at is not None:
+                    due = max(due, previous_chunk_at + 0.5 * (offset - offsets[index - 1]))
+                delay = due - time.monotonic()
                 if delay > 0:
                     await asyncio.sleep(delay)
                 reasoning_part = max(
@@ -289,8 +297,10 @@ class MockOpenAIServer:
                 }]}
                 if continuous:
                     event["usage"] = usage(completion)
-                await send(event)
+                # Timestamp before handing bytes to the transport: the client
+                # can read them before this coroutine resumes after the write.
                 now = time.monotonic()
+                await send(event)
                 served.chunk_times.append(now)
                 if previous_chunk_at is None:
                     served.first_chunk_at = now
@@ -318,6 +328,15 @@ class MockOpenAIServer:
             return response
         finally:
             self.running -= 1
+
+    async def _records(self, request: web.Request) -> web.Response:
+        """Server-side ground truth, for a client in another process."""
+        return web.json_response({
+            "requests": [asdict(r) for r in self.requests],
+            "connection_count": self.connection_count,
+            "max_running": self.max_running,
+            "generation_tokens_total": self.generation_tokens_total,
+        })
 
     async def _metrics(self, request: web.Request) -> web.Response:
         labels = f'model_name="{self.config.model}"'
@@ -365,27 +384,66 @@ def expected_decode_tokens_per_second(config: MockStreamConfig) -> float:
     return (sum(sizes) - sizes[0]) / span if span > 0 else math.inf
 
 
-class ThreadedMockServer:
-    """Run a :class:`MockOpenAIServer` on its own event loop in a thread.
+def _config_from_json(text: str) -> MockStreamConfig:
+    data = json.loads(text)
+    for key in ("stalls", "request_stalls"):
+        if key in data:
+            data[key] = {int(k): float(v) for k, v in data[key].items()}
+    return MockStreamConfig(**data)
 
-    Keeps server work off the client's event loop, as on a real deployment.
-    ``time.monotonic()`` is process-wide, so timestamps stay comparable.
+
+class ProcessMockServer:
+    """Run the mock in a separate Python process.
+
+    This is the closest local stand-in for a real server: its sleeps and
+    writes are not delayed by the client's work, and vice versa.
+    ``time.monotonic()`` is system-wide on Linux and macOS, so the server's
+    timestamps are comparable with the client's. Ground truth is fetched
+    from ``/_mock/records``.
     """
 
     def __init__(self, config: MockStreamConfig | None = None) -> None:
-        import threading
+        self.config = config or MockStreamConfig()
+        self.url = ""
+        self._process: Any = None
 
-        self.server = MockOpenAIServer(config)
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
+    async def __aenter__(self) -> "ProcessMockServer":
+        import sys
 
-    def __enter__(self) -> MockOpenAIServer:
-        self._thread.start()
-        asyncio.run_coroutine_threadsafe(self.server.start(), self._loop).result(timeout=10)
-        return self.server
+        self._process = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "llm_load_tester.mock_server",
+            "--config-json", json.dumps(asdict(self.config)),
+            stdout=asyncio.subprocess.PIPE,
+        )
+        assert self._process.stdout is not None
+        line = await asyncio.wait_for(self._process.stdout.readline(), timeout=20)
+        self.url = line.decode().strip()
+        return self
 
-    def __exit__(self, *exc: Any) -> None:
-        asyncio.run_coroutine_threadsafe(self.server.stop(), self._loop).result(timeout=10)
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=10)
-        self._loop.close()
+    async def __aexit__(self, *exc: Any) -> None:
+        if self._process is not None:
+            self._process.terminate()
+            await self._process.wait()
+
+    async def records(self) -> dict[str, Any]:
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{self.url}/_mock/records") as response:
+                data = await response.json()
+        data["requests"] = [ServedRequest(**r) for r in data["requests"]]
+        return data
+
+
+async def _serve_forever(config: MockStreamConfig) -> None:
+    server = MockOpenAIServer(config)
+    print(await server.start(), flush=True)
+    await asyncio.Event().wait()
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Deterministic OpenAI streaming mock server")
+    parser.add_argument("--config-json", default="{}", help="MockStreamConfig fields as JSON")
+    asyncio.run(_serve_forever(_config_from_json(parser.parse_args().config_json)))

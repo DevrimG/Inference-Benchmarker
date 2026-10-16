@@ -21,7 +21,7 @@ from rich.panel import Panel
 from .arrival import ArrivalSchedule, build_schedule
 from .fixtures import FixtureHandler, payload_fingerprint
 from .manifest import build_manifest, probe_server
-from .metrics import BenchmarkResult, ChunkRecord, ErrorCategory, RequestMetrics
+from .metrics import BenchmarkResult, ChunkRecord, ErrorCategory, RequestMetrics, redact_media
 from .selfcheck import LagMonitor, build_report, measure_event_capacity, peak_event_rate
 from .modelarts_monitoring import ModelArtsCloudEyeCollector, ModelArtsCloudEyeConfig
 from .modalities import ModalityHandler, PayloadResult
@@ -98,6 +98,8 @@ class LoadTestConfig:
     schedule_log_path: str | None = None
     self_check: bool = True
     show_progress: bool = True
+    # Store each request body (media redacted) in the exports.
+    record_request_payload: bool = True
     # TLS. Default: normal certificate and hostname verification.
     # tls_ca_file trusts a specific CA or a pinned self-signed certificate;
     # tls_check_hostname=False is needed when that certificate names no host.
@@ -475,6 +477,7 @@ class LLMBenchmarker:
             endpoint_label=self.config.endpoint_label,
             scheduled_time=scheduled_time,
             is_warmup=is_warmup,
+            request_payload=redact_media(payload) if self.config.record_request_payload else None,
         )
 
         try:

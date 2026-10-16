@@ -185,3 +185,39 @@ async def test_manifest_records_provenance(mock_server, tmp_path) -> None:
     assert exported["manifest"]["arrival_schedule"]["sha256"]
     assert exported["raw_metrics"][0]["chunk_records"]
     assert "secret-key" not in path.read_text()
+
+
+async def test_sent_request_body_is_exported_without_headers(mock_server, tmp_path) -> None:
+    from openpyxl import load_workbook
+
+    mock_server.config = MockStreamConfig(**FAST)
+    result = await run_benchmark(mock_server, api_key="secret-key", total_requests=2)
+    payload = result.request_metrics[0].request_payload
+    assert payload == mock_server.requests[0].body  # exactly what the server received
+    result.export_json(tmp_path / "r.json")
+    result.export_csv(tmp_path / "r.csv")
+    result.export_xlsx(tmp_path / "r.xlsx")
+    exported = json.loads((tmp_path / "r.json").read_text())["raw_metrics"][0]["request_payload"]
+    assert exported["messages"][0]["content"] == "hello"
+    assert "request_payload" in (tmp_path / "r.csv").read_text().splitlines()[0]
+    sheet = load_workbook(tmp_path / "r.xlsx")["Requests"]
+    assert any("hello" in str(c.value) for row in sheet.iter_rows() for c in row)
+    for name in ("r.json", "r.csv"):
+        assert "secret-key" not in (tmp_path / name).read_text()
+
+
+def test_media_is_redacted_but_text_is_kept() -> None:
+    import base64
+    from llm_load_tester.metrics import redact_media
+
+    image = "data:image/png;base64," + base64.b64encode(b"\x89PNG" * 2000).decode()
+    body = {"messages": [{"role": "user", "content": [
+        {"type": "text", "text": "Describe this image."},
+        {"type": "image_url", "image_url": {"url": image}},
+    ]}], "max_tokens": 64}
+    out = redact_media(body)
+    parts = out["messages"][0]["content"]
+    assert parts[0]["text"] == "Describe this image." and out["max_tokens"] == 64
+    assert parts[1]["image_url"]["url"].startswith("data:image/png;base64,<media sha256=")
+    long_text = "word " * 1000
+    assert redact_media({"t": long_text})["t"] == long_text  # long prose is not media

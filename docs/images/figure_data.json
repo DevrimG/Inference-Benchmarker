@@ -1,0 +1,109 @@
+{
+  "steady-window": {
+    "steady_window_s": [
+      0.006027,
+      20.198183
+    ],
+    "steady_tok_s": 197.403,
+    "full_window_s": 22.579222,
+    "full_tok_s": 181.406
+  },
+  "token-timeline": {
+    "requests": [
+      {
+        "label": "smoothest",
+        "ttft_s": 1.094,
+        "decode_tok_s": 59.8,
+        "max_stall_s": 0.061,
+        "end_s": 5.34
+      },
+      {
+        "label": "median",
+        "ttft_s": 1.067,
+        "decode_tok_s": 55.9,
+        "max_stall_s": 0.312,
+        "end_s": 5.61
+      },
+      {
+        "label": "largest stall",
+        "ttft_s": 0.652,
+        "decode_tok_s": 40.3,
+        "max_stall_s": 0.838,
+        "end_s": 6.95
+      }
+    ]
+  },
+  "itl-buckets": {
+    "buckets": [
+      {
+        "bucket_le_ms": "10",
+        "client_percent": 1.881,
+        "server_percent": 0.0
+      },
+      {
+        "bucket_le_ms": "25",
+        "client_percent": 86.503,
+        "server_percent": 99.387
+      },
+      {
+        "bucket_le_ms": "50",
+        "client_percent": 3.272,
+        "server_percent": 0.098
+      },
+      {
+        "bucket_le_ms": "75",
+        "client_percent": 0.941,
+        "server_percent": 0.0
+      },
+      {
+        "bucket_le_ms": "100",
+        "client_percent": 0.573,
+        "server_percent": 0.0
+      },
+      {
+        "bucket_le_ms": "150",
+        "client_percent": 1.881,
+        "server_percent": 0.0
+      },
+      {
+        "bucket_le_ms": "200",
+        "client_percent": 2.74,
+        "server_percent": 0.515
+      },
+      {
+        "bucket_le_ms": "300",
+        "client_percent": 1.268,
+        "server_percent": 0.0
+      },
+      {
+        "bucket_le_ms": "400",
+        "client_percent": 0.613,
+        "server_percent": 0.0
+      },
+      {
+        "bucket_le_ms": "500",
+        "client_percent": 0.204,
+        "server_percent": 0.0
+      },
+      {
+        "bucket_le_ms": "750",
+        "client_percent": 0.082,
+        "server_percent": 0.0
+      },
+      {
+        "bucket_le_ms": "1000",
+        "client_percent": 0.041,
+        "server_percent": 0.0
+      },
+      {
+        "bucket_le_ms": ">1000",
+        "client_percent": 0.0,
+        "server_percent": 0.0
+      }
+    ]
+  },
+  "source": {
+    "run": "outputs/rti_qwen3_30b_a3b_20261016/fixed-20261016-150436/r1/results.json",
+    "model": "Qwen3-30B-A3B"
+  }
+}

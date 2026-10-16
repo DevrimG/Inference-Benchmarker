@@ -4,6 +4,9 @@ An asynchronous CLI benchmarker for OpenAI-compatible LLM APIs across text, imag
 
 Python 3.10+ is required. The examples below use Python 3.12.
 
+See the **[User Manual](docs/USER_MANUAL.md)** for a step-by-step guide with
+diagrams: running tests, reading results and checking the numbers.
+
 ## Features
 
 - **Multiple Modalities**: Supports Text, Image (multimodal), and Voice inputs

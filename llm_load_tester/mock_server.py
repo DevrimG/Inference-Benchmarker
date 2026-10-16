@@ -66,6 +66,8 @@ class MockStreamConfig:
     cached_prompt_tokens: int = 0
     # "auto" follows the request's stream_options like vLLM; "never" omits usage.
     usage_mode: str = "auto"
+    # Answer 400 to continuous_usage_stats, like servers that reject unknown fields.
+    reject_continuous_usage: bool = False
     token_text: str = " a"
     model: str = "mock-model"
     server_version: str = "mock-vllm-0.0.1"
@@ -205,6 +207,13 @@ class MockOpenAIServer:
         peer = f"{peername[0]}:{peername[1]}" if peername else "unknown"
         self.peers.add(peer)
         body = await request.json()
+        if self.config.reject_continuous_usage and (
+            (body.get("stream_options") or {}).get("continuous_usage_stats")
+        ):
+            return web.json_response(
+                {"error": "Unrecognized field: stream_options.continuous_usage_stats"},
+                status=400,
+            )
         served = ServedRequest(
             index=len(self.requests) + 1, received_at=received, peer=peer, body=body
         )
@@ -354,3 +363,29 @@ def expected_decode_tokens_per_second(config: MockStreamConfig) -> float:
     sizes = config.chunk_sizes()
     span = offsets[-1] - offsets[0]
     return (sum(sizes) - sizes[0]) / span if span > 0 else math.inf
+
+
+class ThreadedMockServer:
+    """Run a :class:`MockOpenAIServer` on its own event loop in a thread.
+
+    Keeps server work off the client's event loop, as on a real deployment.
+    ``time.monotonic()`` is process-wide, so timestamps stay comparable.
+    """
+
+    def __init__(self, config: MockStreamConfig | None = None) -> None:
+        import threading
+
+        self.server = MockOpenAIServer(config)
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
+
+    def __enter__(self) -> MockOpenAIServer:
+        self._thread.start()
+        asyncio.run_coroutine_threadsafe(self.server.start(), self._loop).result(timeout=10)
+        return self.server
+
+    def __exit__(self, *exc: Any) -> None:
+        asyncio.run_coroutine_threadsafe(self.server.stop(), self._loop).result(timeout=10)
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=10)
+        self._loop.close()

@@ -446,6 +446,7 @@ class BenchmarkResult:
     manifest: dict[str, Any] | None = None
     slo: dict[str, Any] | None = None
     endpoint_label: str | None = None
+    stream_usage_effective: str | None = None
     _measurement_cache: tuple[Any, dict[str, Any]] | None = field(
         default=None, repr=False, compare=False
     )
@@ -826,6 +827,7 @@ class BenchmarkResult:
                 f"{estimated} request(s) have estimated token counts (no server usage)."
                 if estimated else "All token counts are server-reported."
             ),
+            "stream_usage_effective": self.stream_usage_effective,
             "coordinated_omission": coordinated,
             "littles_law": littles,
             "client_self_check": self.client_self_check,

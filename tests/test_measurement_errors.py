@@ -115,3 +115,13 @@ async def test_client_self_check_is_reported(mock_server) -> None:
     assert check["event_loop_lag_ms"]["n"] > 0
     assert check["event_loop_lag_ms"]["p99"] is not None
     assert "verdict" in check
+
+
+async def test_server_rejecting_continuous_usage_falls_back_to_final_usage(mock_server) -> None:
+    mock_server.config = MockStreamConfig(
+        output_tokens=4, ttft_s=0.005, token_interval_s=0.002, reject_continuous_usage=True
+    )
+    result = await run_benchmark(mock_server, total_requests=3, warmup_requests=1)
+    assert all(m.error.value == "none" for m in result.request_metrics)
+    assert all(m.token_count_source == "provider_usage" for m in result.request_metrics)
+    assert result.get_summary()["stream_usage_effective"].startswith("final")

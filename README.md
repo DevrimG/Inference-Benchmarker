@@ -150,8 +150,16 @@ streaming, buffered responses, GLM metadata, a changing vLLM-style `/metrics`
 endpoint, and the Cloud Eye batch-query contract:
 
 ```bash
-python -m unittest discover -v
+python -m pip install -r requirements-dev.txt
+python -m pytest
 ```
+
+`llm_load_tester/mock_server.py` is a deterministic OpenAI streaming server with
+configurable per-token cadence, tokens per chunk (to imitate MTP), injected
+stalls, `continuous_usage_stats` usage and a vLLM-named `/metrics` endpoint whose
+counters match what it served. `tests/test_phase3_proof.py` checks that the
+client reproduces that cadence, chunking and stalls, and that its totals and
+percentiles agree with the server's counters and histogram buckets.
 
 This validates collection and timing semantics without loading a model. A short
 smoke run against real vLLM is still recommended once GPU access is available,
@@ -163,6 +171,65 @@ To enable `/metrics` collection, install the full project requirements first:
 ```bash
 python3.12 -m pip install -r requirements.txt
 ```
+
+## Non-Interactive Lab Runs
+
+Pass a TOML or JSON config to run without prompts (the interactive CLI is used
+when no arguments are given):
+
+```bash
+python -m llm_load_tester --config examples/lab.example.toml
+python tools/run_fixed_benchmark.py --config examples/lab.example.toml
+```
+
+`examples/lab.example.toml` documents every key. Modes:
+
+- `fixed`: one workload, repeated `repeats` times, with the CV of key metrics.
+- `ladder`: concurrency levels in order, stopping when a rule fires on two
+  consecutive levels (errors > 2 %, TTFT p95 over the workload's limit,
+  < 5 % throughput gain, p5 decode < 25 tok/s). Reports the knee.
+- `soak`: run for `duration_s` and report `window_s` (default 5-minute) windows.
+- `burst`: release exactly C requests at once (PRB-REF-1N style).
+
+Several `[[endpoints]]` fan out with a weighted concurrency split, one shared
+start instant and time origin; merged records carry an `endpoint` column.
+Credentials come from the environment variables named in the config.
+
+### Measurement semantics
+
+- Arrival modes: `closed` (C workers), `poisson` / `gamma` (open loop at a
+  rate, gamma shape = vLLM `--burstiness`), `burst`, and `replay` from JSONL
+  (`timestamp` in ms or `offset_s`, optional `fixture_id`). The schedule is
+  built before the run and written to `schedule_<endpoint>.jsonl`.
+- Every SSE read is recorded as (time, bytes, events, token events, cumulative
+  completion tokens). TTFT, per-token ITL, chunk gaps, max stall and decode
+  tok/s (first to last output read) come from that record.
+- TPOT is decode time over the tokens that arrived after the first output
+  read, so the first token and reasoning tokens produced before it are excluded.
+- Streams request `include_usage` and `continuous_usage_stats`
+  (`stream_usage = "final"` or `"off"` for servers that reject them). Without
+  usage, tokens are counted one per SSE event and marked
+  `sse_event_count_estimate`.
+- Connections are kept alive; `cold_connections = true` opens one per request.
+  Monitoring uses its own connection pool.
+- Aggregate throughput is reported for the steady-state window (in flight ==
+  C for closed loop) next to the full window.
+- Every distribution has `n`, percentiles and a 95 % CI (bootstrap up to 5000
+  samples, order-statistic interval above).
+- With a rate cap or open loop, `schedule_lag_s` and `latency_from_intended_s`
+  expose coordinated omission.
+- Summaries include goodput against `[slo]`, a Little's-law check, a client
+  self-check (event-loop lag, parse capacity vs peak event rate), client/server
+  agreement when `/metrics` is collected, and a manifest (tool git SHA,
+  endpoint, served model, server version, image digest, tokenizer, fixture
+  hashes, client host, schedule seed and hash).
+
+### Cross-tool agreement
+
+`tools/cross_tool_agreement.py` runs `vllm bench serve` on the same fixtures,
+endpoint and arrival process as one of our runs and reports per-metric
+differences (`--dry-run` prints the command; `--vllm-result` compares a saved
+file). AISBench can be run through `--aisbench-cmd`.
 
 ## Project Structure
 

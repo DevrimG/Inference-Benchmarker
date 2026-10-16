@@ -21,3 +21,9 @@ sound/*
 
 llm_benchmark_*.json
 llm_benchmark_*.csv
+
+# Benchmark results, customer reports and local environments: never commit
+outputs/
+venvsource/
+certs/
+*.pptx

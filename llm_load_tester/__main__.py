@@ -19,8 +19,13 @@ from .modalities import get_handler
 from .modelarts_monitoring import ModelArtsCloudEyeConfig
 
 
-def main() -> int:
-    """Main entry point."""
+def main(argv: list[str] | None = None) -> int:
+    """Main entry point: config-file CLI when arguments are given, else interactive."""
+    argv = sys.argv[1:] if argv is None else argv
+    if argv:
+        from .lab_cli import main as lab_main
+
+        return lab_main(argv)
     try:
         # Run interactive configuration
         config_dict = run_interactive_config()

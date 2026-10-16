@@ -1,0 +1,73 @@
+# Non-interactive lab config. Run with:
+#   python -m llm_load_tester --config examples/lab.example.toml
+#   python tools/run_fixed_benchmark.py --config examples/lab.example.toml
+# Secrets are read from the environment variables named here, never from this file.
+
+mode = "fixed"                  # fixed | ladder | soak | burst
+model = "Qwen3-32B"
+api_route = "v1/chat/completions"
+api_key_env = "BENCH_API_KEY"
+modality = "fixture"            # text | image | voice | fixture
+fixtures = "examples/chat_fixtures.jsonl"
+workload = "chat-short"         # selects [workloads.<name>] below
+
+concurrency = 8                 # total across endpoints
+total_requests = 200            # closed loop; cap for open loop / replay (0 = all)
+warmup_requests = 8             # at most `concurrency` in flight
+repeats = 3                     # r1..rk, reported with CV
+timeout_seconds = 600
+cold_connections = false        # true opens a new TCP/TLS connection per request
+stream_usage = "continuous"     # continuous | final | off
+tokenizer = ""                  # optional HF tokenizer for estimates when usage is absent
+image_digest = ""               # or set BENCH_IMAGE_DIGEST
+output_dir = "outputs/lab"
+exports = ["json", "csv", "xlsx"]
+
+[arrival]
+mode = "closed"                 # closed | poisson | gamma | burst | replay
+rate = 4.0                      # requests/s for poisson/gamma (split by endpoint weight)
+shape = 1.0                     # gamma shape; <1 burstier, >1 smoother
+seed = 42
+replay_file = ""                # JSONL with timestamp (ms) or offset_s, optional fixture_id
+
+[[endpoints]]
+label = "a2-node1"
+url = "http://10.0.0.11:8000"
+metrics_url = "http://10.0.0.11:8000/metrics"
+weight = 1
+
+[[endpoints]]
+label = "a2-node2"
+url = "http://10.0.0.12:8000"
+metrics_url = "http://10.0.0.12:8000/metrics"
+weight = 1
+
+[metrics]
+scrape_interval_s = 1.0
+
+[slo]
+ttft_p95_s = 2.0
+decode_p5_tok_s = 25
+max_stall_s = 1.0
+
+[workloads.chat-short]
+ttft_p95_limit_s = 2.0          # ladder stop rule for this workload
+
+[workloads.rag-long]
+ttft_p95_limit_s = 8.0
+slo = { ttft_p95_s = 8.0 }
+
+[ladder]
+levels = [1, 2, 4, 8, 16, 32, 64]
+requests_per_concurrency = 10
+max_error_rate_percent = 2.0
+min_throughput_gain_percent = 5.0
+min_p5_decode_tok_s = 25.0
+consecutive_levels = 2
+
+[soak]
+duration_s = 3600
+window_s = 300
+
+[burst]
+cooldown_s = 30

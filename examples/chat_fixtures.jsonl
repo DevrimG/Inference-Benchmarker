@@ -1,0 +1,3 @@
+{"fixture_id": "chat-001", "messages": [{"role": "user", "content": "Explain how a token bucket rate limiter works."}], "max_tokens": 256, "ignore_eos": true}
+{"fixture_id": "chat-002", "messages": [{"role": "user", "content": "Summarise the trade-offs of tensor versus data parallelism for LLM serving."}], "max_tokens": 256, "ignore_eos": true}
+{"fixture_id": "chat-003", "prompt": "Write a short checklist for validating a load-testing tool.", "max_tokens": 256, "ignore_eos": true}

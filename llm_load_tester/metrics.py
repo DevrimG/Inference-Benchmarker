@@ -730,6 +730,7 @@ class BenchmarkResult:
             len(self.request_metrics),
             self.end_time,
             self.client_self_check is not None,
+            id(self.server_metrics),
             json.dumps(self.slo, sort_keys=True, default=str),
         )
         if self._measurement_cache and self._measurement_cache[0] == cache_key:
@@ -831,6 +832,19 @@ class BenchmarkResult:
         }
         if self.slo:
             result["goodput"] = self._goodput(ok, measured, full_window, distributions)
+        if self.server_metrics:
+            from .agreement import server_agreement
+
+            per_endpoint = self.server_metrics.get("per_endpoint")
+            if isinstance(per_endpoint, dict):
+                result["server_agreement"] = {
+                    label: server_agreement(
+                        [m for m in measured if m.endpoint_label == label], metrics
+                    )
+                    for label, metrics in per_endpoint.items()
+                }
+            else:
+                result["server_agreement"] = server_agreement(measured, self.server_metrics)
         self._measurement_cache = (cache_key, result)
         return result
 

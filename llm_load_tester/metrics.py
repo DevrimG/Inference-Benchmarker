@@ -79,6 +79,8 @@ class RequestMetrics:
     first_output_kind: str | None = None
     response_mode: str | None = None
     response_content_type: str = ""
+    response_headers: list[dict[str, str]] = field(default_factory=list)
+    response_header_redactions: list[dict[str, Any]] = field(default_factory=list)
     token_count_source: str = "character_estimate"
 
     @property
@@ -252,6 +254,8 @@ class RequestMetrics:
             "first_output_kind": self.first_output_kind,
             "response_mode": self.response_mode,
             "response_content_type": self.response_content_type,
+            "response_headers": self.response_headers,
+            "response_header_redactions": self.response_header_redactions,
             "error": self.error.value,
             "error_message": self.error_message,
             "status_code": self.status_code,

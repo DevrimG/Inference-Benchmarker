@@ -125,3 +125,16 @@ async def test_server_rejecting_continuous_usage_falls_back_to_final_usage(mock_
     assert all(m.error.value == "none" for m in result.request_metrics)
     assert all(m.token_count_source == "provider_usage" for m in result.request_metrics)
     assert result.get_summary()["stream_usage_effective"].startswith("final")
+
+
+async def test_multi_token_events_with_final_usage_only_are_scaled(mock_server) -> None:
+    """Live MaaS behaviour: ~3 tokens per SSE event, usage only at the end."""
+    mock_server.config = MockStreamConfig(
+        output_tokens=30, tokens_per_chunk=3, ttft_s=0.02, token_interval_s=0.01
+    )
+    result = await run_benchmark(mock_server, stream_usage="final")
+    metric = result.request_metrics[0]
+    assert metric.tokens_generated == 30
+    assert metric.token_timeline_source == "sse_event_count_scaled_to_final_usage"
+    assert metric.decode_tokens_per_second == pytest.approx(100, rel=0.1)
+    assert metric.tpot == pytest.approx(0.01, rel=0.1)

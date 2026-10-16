@@ -588,7 +588,10 @@ class LLMBenchmarker:
                     for event_data in events:
                         token_bearing, usage_tokens = process_event(event_data, observed_time)
                         token_events += int(token_bearing)
-                        if usage_tokens is not None:
+                        # Running usage only counts when it rides on an output
+                        # event; a final usage-only event in the same read is
+                        # the total, not a per-chunk count.
+                        if token_bearing and usage_tokens is not None:
                             cumulative = usage_tokens
                     metrics.chunk_records.append(
                         ChunkRecord(observed_time, nbytes, len(events), token_events, cumulative)
@@ -656,7 +659,7 @@ class LLMBenchmarker:
                     elif timeline:
                         # One output-bearing SSE event per token; undercounts
                         # multi-token (MTP/speculative) chunks.
-                        metrics.tokens_generated = timeline[-1][1]
+                        metrics.tokens_generated = int(round(timeline[-1][1]))
                         metrics.token_count_source = "sse_event_count_estimate"
                     else:
                         metrics.tokens_generated = (

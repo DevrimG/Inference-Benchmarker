@@ -112,12 +112,14 @@ class RequestMetrics:
     def token_timeline(self) -> list[tuple[float, int]]:
         """(arrival time, cumulative completion tokens) for every output read.
 
-        Uses the server's continuous usage count when present; otherwise each
-        output-bearing SSE event counts as one token (an estimate that
-        undercounts multi-token chunks).
+        Uses the server's continuous usage count when present. Otherwise each
+        output-bearing SSE event counts as one token; when the server reported
+        a final total, that event count is scaled to it, which assumes tokens
+        are spread evenly over events (servers that stream several tokens per
+        event, such as MTP/speculative decoding, would otherwise be undercounted).
         """
-        timeline: list[tuple[float, int]] = []
-        cumulative = 0
+        timeline: list[tuple[float, float]] = []
+        cumulative = 0.0
         for record in self.chunk_records:
             if record.cumulative_tokens is not None:
                 if record.token_events:
@@ -128,7 +130,29 @@ class RequestMetrics:
             elif record.token_events:
                 cumulative += record.token_events
                 timeline.append((record.t, cumulative))
+        scale = self._final_usage_scale(timeline)
+        if scale is not None:
+            timeline = [(at, count * scale) for at, count in timeline]
         return timeline
+
+    def _final_usage_scale(self, timeline: list[tuple[float, float]]) -> float | None:
+        """Factor mapping event counts onto the server's final token total."""
+        if self.token_count_source != "provider_usage" or not timeline:
+            return None
+        if any(r.cumulative_tokens is not None for r in self.chunk_records if r.token_events):
+            return None
+        events = timeline[-1][1]
+        target = float(self.tokens_generated)
+        reasoning = int(
+            ((self.provider_usage.get("completion_tokens_details") or {}).get("reasoning_tokens"))
+            or 0
+        )
+        if reasoning and not self.reasoning_content:
+            # Reasoning was counted but not streamed: it is not in the events.
+            target -= reasoning
+        if events <= 0 or target <= events:
+            return None
+        return target / events
 
     @property
     def token_timeline_source(self) -> str:
@@ -139,8 +163,19 @@ class RequestMetrics:
         if with_usage == len(token_reads):
             return "continuous_usage"
         if with_usage == 0:
+            if self._final_usage_scale(self.token_timeline_unscaled()) is not None:
+                return "sse_event_count_scaled_to_final_usage"
             return "sse_event_count_estimate"
         return "mixed_usage_and_event_count"
+
+    def token_timeline_unscaled(self) -> list[tuple[float, float]]:
+        cumulative = 0.0
+        out: list[tuple[float, float]] = []
+        for record in self.chunk_records:
+            if record.token_events and record.cumulative_tokens is None:
+                cumulative += record.token_events
+                out.append((record.t, cumulative))
+        return out
 
     @property
     def chunk_gaps(self) -> list[float]:
@@ -155,7 +190,9 @@ class RequestMetrics:
         values: list[float] = []
         for (t0, c0), (t1, c1) in zip(timeline, timeline[1:]):
             if c1 > c0:
-                values.extend([(t1 - t0) / (c1 - c0)] * (c1 - c0))
+                # Weight each gap by the tokens it carried (rounded when the
+                # timeline is scaled from event counts).
+                values.extend([(t1 - t0) / (c1 - c0)] * max(1, round(c1 - c0)))
         return values
 
     @property

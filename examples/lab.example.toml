@@ -22,6 +22,7 @@ tokenizer = ""                  # optional HF tokenizer for estimates when usage
 image_digest = ""               # or set BENCH_IMAGE_DIGEST
 output_dir = "outputs/lab"
 exports = ["json", "csv", "xlsx"]
+record_request_payload = true   # store each sent body (base64 media replaced by a hash)
 
 [arrival]
 mode = "closed"                 # closed | poisson | gamma | burst | replay

@@ -116,6 +116,7 @@ def build_base_config(cfg: dict[str, Any]) -> tuple[LoadTestConfig, list[Endpoin
         tokenizer=cfg.get("tokenizer") or None,
         image_digest=cfg.get("image_digest") or None,
         show_progress=bool(cfg.get("show_progress", True)),
+        record_request_payload=bool(cfg.get("record_request_payload", True)),
     )
     return base, endpoints
 

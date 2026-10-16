@@ -45,6 +45,37 @@ class ErrorCategory(Enum):
         return cls.UNKNOWN
 
 
+EXCEL_CELL_LIMIT = 32_000  # Excel caps a cell at 32,767 characters
+_MEDIA_MIN_CHARS = 1024
+
+
+def redact_media(value: Any) -> Any:
+    """Copy of a request body with embedded base64 media replaced by a digest.
+
+    Text, parameters and structure are kept; ``data:...;base64,...`` URIs and
+    other long base64 strings (image or audio bytes) become
+    ``<media sha256=... chars=...>`` so exports stay small and comparable.
+    """
+    import base64
+    import binascii
+    import hashlib
+
+    if isinstance(value, dict):
+        return {key: redact_media(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_media(item) for item in value]
+    if isinstance(value, str) and len(value) >= _MEDIA_MIN_CHARS:
+        body = value.split(";base64,", 1)[1] if value.startswith("data:") and ";base64," in value else value
+        try:
+            base64.b64decode(body[:4096 - 4096 % 4], validate=True)
+        except (binascii.Error, ValueError):
+            return value
+        prefix = value.split(",", 1)[0] + "," if value.startswith("data:") else ""
+        digest = hashlib.sha256(value.encode()).hexdigest()[:16]
+        return f"{prefix}<media sha256={digest} chars={len(value)}>"
+    return value
+
+
 class ChunkRecord(NamedTuple):
     """One raw read from the response body.
 
@@ -107,6 +138,8 @@ class RequestMetrics:
     scheduled_time: float | None = None
     chunk_records: list[ChunkRecord] = field(default_factory=list, repr=False)
     is_warmup: bool = False
+    # The JSON body that was sent (media redacted); never includes headers.
+    request_payload: dict[str, Any] | None = field(default=None, repr=False)
 
     # -- per-read derivations -------------------------------------------------
     def token_timeline(self) -> list[tuple[float, int]]:
@@ -436,6 +469,7 @@ class RequestMetrics:
             "error": self.error.value,
             "error_message": self.error_message,
             "status_code": self.status_code,
+            "request_payload": self.request_payload,
             "response_content": self.response_content,
             "reasoning_content": self.reasoning_content,
         }
@@ -1200,7 +1234,11 @@ class BenchmarkResult:
 
         def excel_value(value: Any) -> Any:
             if isinstance(value, (dict, list, tuple, set)):
-                return json.dumps(value, sort_keys=True, ensure_ascii=False)
+                value = json.dumps(value, sort_keys=True, ensure_ascii=False)
+            if isinstance(value, str) and len(value) > EXCEL_CELL_LIMIT:
+                return value[:EXCEL_CELL_LIMIT] + f"... [truncated, {len(value)} chars; see JSON export]"
+            if isinstance(value, str):
+                return value
             if isinstance(value, Enum):
                 return value.value
             if isinstance(value, datetime):

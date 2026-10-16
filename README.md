@@ -110,6 +110,10 @@ TTFB only when the endpoint actually exposes one.
 
 JSON exports include a `server_metrics` section and each raw request record
 includes its captured `response_headers` and any `response_header_redactions`.
+Each record also has `request_payload`, the JSON body that was sent, with
+embedded base64 images or audio replaced by `<media sha256=... chars=...>`
+(set `record_request_payload = false` to omit it). Excel cells longer than
+32,000 characters are truncated with a pointer to the JSON export.
 Request headers are never written to exports, so an inference `Authorization`
 API key is not persisted. Excel exports keep everything in one `.xlsx` file with
 `Benchmark Summary`, `Requests`, `vLLM Summary`,

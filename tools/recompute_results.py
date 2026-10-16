@@ -54,7 +54,8 @@ def load_result(path: Path) -> BenchmarkResult:
             setattr(metric, name, raw.get(name))
         for name in ("tokens_generated", "input_tokens", "token_count_source", "provider_usage",
                      "reasoning_content", "response_content", "finish_reason", "fixture_id",
-                     "scheduled_time", "provider_response_id", "status_code", "response_mode"):
+                     "scheduled_time", "provider_response_id", "status_code", "response_mode",
+                     "request_payload"):
             if name in raw:
                 setattr(metric, name, raw[name])
         metric.endpoint_label = raw.get("endpoint")

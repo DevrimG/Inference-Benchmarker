@@ -62,6 +62,9 @@ The interactive CLI will guide you through:
 - **End-to-End Latency**: Total request completion time (p50, p95, p99)
 - **Throughput**: Tokens per second (overall and per-request averages)
 - **Error Rates**: Categorized by HTTP status codes
+- **Response Headers**: Ordered raw HTTP response header name/value pairs, with
+  duplicate fields and original casing preserved. Credential and cookie header
+  values are stored as `[REDACTED]` and listed in `response_header_redactions`.
 
 The primary responsiveness metric is selected from evidence in each response:
 streamed token-bearing output uses TTFT, while a buffered response uses TTFB and
@@ -105,8 +108,11 @@ Server-internal metrics remain separate from client-observed timings. Standard
 vLLM exposes a TTFT histogram; provider-specific TTFB histograms are reported as
 TTFB only when the endpoint actually exposes one.
 
-JSON exports include a `server_metrics` section. Excel exports keep everything
-in one `.xlsx` file with `Benchmark Summary`, `Requests`, `vLLM Summary`,
+JSON exports include a `server_metrics` section and each raw request record
+includes its captured `response_headers` and any `response_header_redactions`.
+Request headers are never written to exports, so an inference `Authorization`
+API key is not persisted. Excel exports keep everything in one `.xlsx` file with
+`Benchmark Summary`, `Requests`, `vLLM Summary`,
 `vLLM Timeline`, and `Request Context` sheets. The request-context sheet aligns
 each client request window with nearby server gauge scrapes. These values are
 contextual observations, not exact Prometheus attribution to an individual

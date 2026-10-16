@@ -26,6 +26,33 @@ from .server_metrics import (
 )
 
 
+_REDACTED_HEADER_VALUE = "[REDACTED]"
+_SENSITIVE_RESPONSE_HEADER_NAMES = frozenset({
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "cookie2",
+    "set-cookie",
+    "set-cookie2",
+    "api-key",
+    "apikey",
+    "x-api-key",
+    "x-apikey",
+    "api-token",
+    "x-api-token",
+    "access-token",
+    "x-access-token",
+    "refresh-token",
+    "x-refresh-token",
+    "auth-token",
+    "x-auth-token",
+    "client-key",
+    "x-client-key",
+    "client-secret",
+    "x-client-secret",
+})
+
+
 @dataclass
 class LoadTestConfig:
     """Configuration for a load test run."""
@@ -154,6 +181,9 @@ class AsyncRateLimiter:
                 wait_time = (1 - self.tokens) / self.target_rps
                 await asyncio.sleep(wait_time)
                 self.tokens = 0
+                # The wait has already paid for this token. Do not credit its
+                # elapsed time again on the next acquisition.
+                self.last_update = time.monotonic()
             else:
                 self.tokens -= 1
 
@@ -355,6 +385,10 @@ class LLMBenchmarker:
                 metrics.upstream_request_id = self._extract_upstream_request_id(response.headers)
                 metrics.upstream_span_id = self._extract_upstream_span_id(response.headers)
                 metrics.response_content_type = response.headers.get("Content-Type", "")
+                (
+                    metrics.response_headers,
+                    metrics.response_header_redactions,
+                ) = self._capture_response_headers(response)
 
                 raw_response = bytearray()
                 if response.status != 200:
@@ -529,6 +563,61 @@ class LLMBenchmarker:
             metrics.end_time = time.monotonic()
         
         return metrics
+
+    @staticmethod
+    def _decode_raw_header_part(value: Any) -> str:
+        """Decode one raw HTTP header part without changing its spelling."""
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return bytes(value).decode("latin-1", errors="replace")
+        return str(value)
+
+    @classmethod
+    def _is_sensitive_response_header(cls, name: str) -> bool:
+        """Return whether a response header value contains credential material."""
+        normalized = name.casefold().replace("_", "-")
+        if normalized in _SENSITIVE_RESPONSE_HEADER_NAMES:
+            return True
+        if normalized.startswith("set-cookie"):
+            return True
+        return normalized.endswith((
+            "-api-key",
+            "-apikey",
+            "-auth-token",
+            "-access-token",
+            "-refresh-token",
+            "-client-secret",
+        ))
+
+    @classmethod
+    def _capture_response_headers(
+        cls,
+        response: Any,
+    ) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+        """Capture raw response headers while redacting credential values.
+
+        ``aiohttp`` exposes ``raw_headers`` as an ordered sequence of byte
+        pairs.  Reading that sequence instead of ``response.headers`` keeps
+        duplicate fields and the server's original header-name casing.
+        """
+        captured: list[dict[str, str]] = []
+        redactions: list[dict[str, Any]] = []
+        for index, pair in enumerate(getattr(response, "raw_headers", ())):
+            try:
+                raw_name, raw_value = pair
+            except (TypeError, ValueError):
+                continue
+            name = cls._decode_raw_header_part(raw_name)
+            value = cls._decode_raw_header_part(raw_value)
+            if cls._is_sensitive_response_header(name):
+                value = _REDACTED_HEADER_VALUE
+                redactions.append({
+                    "index": index,
+                    "name": name,
+                    "reason": "sensitive credential/cookie header",
+                    "replacement": _REDACTED_HEADER_VALUE,
+                })
+            captured.append({"name": name, "value": value})
+        return captured, redactions
 
     def _extract_upstream_request_id(self, headers: Any) -> str | None:
         """Return a provider request id from common response header names."""

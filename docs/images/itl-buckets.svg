@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 360" width="760" height="360" role="img" aria-labelledby="title desc">
+<title id="title">ITL buckets</title><desc id="desc">Grouped bars of client and server inter-token gap shares per bucket.</desc>
+<style>
+  svg { --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+        --grid:#e1e0d9; --axis:#c3c2b7; --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a;
+        --band:rgba(42,120,214,0.10); --box:#f3f2ee; --ring:rgba(11,11,11,0.10); }
+  @media (prefers-color-scheme: dark) {
+    svg { --surface:#1a1a19; --ink:#f0efec; --ink2:#c3c2b7; --muted:#898781;
+          --grid:#2c2c2a; --axis:#383835; --s1:#3987e5; --s2:#d95926; --s3:#199e70;
+          --band:rgba(57,135,229,0.16); --box:#242422; --ring:rgba(255,255,255,0.10); }
+  }
+  text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; fill: var(--ink); }
+  .t { font-size: 15px; font-weight: 600; }
+  .l { font-size: 12.5px; fill: var(--ink2); }
+  .m { font-size: 11.5px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+  .b { font-size: 12.5px; font-weight: 600; }
+  .grid { stroke: var(--grid); stroke-width: 1; }
+  .axis { stroke: var(--axis); stroke-width: 1; }
+  .box { fill: var(--box); stroke: var(--ring); stroke-width: 1; }
+  .arrow { stroke: var(--ink2); stroke-width: 1.5; fill: none; marker-end: url(#ah); }
+  .dim { stroke: var(--ink2); stroke-width: 1; fill: none; }
+</style>
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+  orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--ink2)"/></marker></defs>
+<rect width="760" height="360" rx="8" style="fill:var(--surface)"/>
+<text x="24.0" y="32.0" class="t" text-anchor="start" >Inter-token gaps by vLLM histogram bucket (log share)</text>
+<text x="24.0" y="52.0" class="l" text-anchor="start" >Client gaps between reads vs the server's own ITL histogram, same run.</text>
+<rect x="500" y="64" width="10" height="10" rx="2" style="fill:var(--s1)"/>
+<text x="516.0" y="73.0" class="l" text-anchor="start" >client (this tool)</text>
+<rect x="630" y="64" width="10" height="10" rx="2" style="fill:var(--s2)"/>
+<text x="646.0" y="73.0" class="l" text-anchor="start" >server /metrics</text>
+<line x1="70" y1="290.0" x2="730" y2="290.0" class="grid"/>
+<text x="62.0" y="294.0" class="m" text-anchor="end" >0.01 %</text>
+<line x1="70" y1="241.5" x2="730" y2="241.5" class="grid"/>
+<text x="62.0" y="245.5" class="m" text-anchor="end" >0.1 %</text>
+<line x1="70" y1="193.0" x2="730" y2="193.0" class="grid"/>
+<text x="62.0" y="197.0" class="m" text-anchor="end" >1 %</text>
+<line x1="70" y1="144.5" x2="730" y2="144.5" class="grid"/>
+<text x="62.0" y="148.5" class="m" text-anchor="end" >10 %</text>
+<line x1="70" y1="96.0" x2="730" y2="96.0" class="grid"/>
+<text x="62.0" y="100.0" class="m" text-anchor="end" >100 %</text>
+<line x1="70" y1="290" x2="730" y2="290" class="axis"/>
+<path d="M82.4,290.0 L82.4,182.7 Q82.4,179.7 85.4,179.7 L91.4,179.7 Q94.4,179.7 94.4,182.7 L94.4,290.0 Z" style="fill:var(--s1)"/>
+<text x="95.4" y="306.0" class="m" text-anchor="middle" >10</text>
+<path d="M133.2,290.0 L133.2,102.1 Q133.2,99.1 136.2,99.1 L142.2,99.1 Q145.2,99.1 145.2,102.1 L145.2,290.0 Z" style="fill:var(--s1)"/>
+<path d="M147.2,290.0 L147.2,99.1 Q147.2,96.1 150.2,96.1 L156.2,96.1 Q159.2,96.1 159.2,99.1 L159.2,290.0 Z" style="fill:var(--s2)"/>
+<text x="146.2" y="306.0" class="m" text-anchor="middle" >25</text>
+<path d="M183.9,290.0 L183.9,171.0 Q183.9,168.0 186.9,168.0 L192.9,168.0 Q195.9,168.0 195.9,171.0 L195.9,290.0 Z" style="fill:var(--s1)"/>
+<path d="M197.9,290.0 L197.9,244.9 Q197.9,241.9 200.9,241.9 L206.9,241.9 Q209.9,241.9 209.9,244.9 L209.9,290.0 Z" style="fill:var(--s2)"/>
+<text x="196.9" y="306.0" class="m" text-anchor="middle" >50</text>
+<path d="M234.7,290.0 L234.7,197.3 Q234.7,194.3 237.7,194.3 L243.7,194.3 Q246.7,194.3 246.7,197.3 L246.7,290.0 Z" style="fill:var(--s1)"/>
+<text x="247.7" y="306.0" class="m" text-anchor="middle" >75</text>
+<path d="M285.5,290.0 L285.5,207.7 Q285.5,204.7 288.5,204.7 L294.5,204.7 Q297.5,204.7 297.5,207.7 L297.5,290.0 Z" style="fill:var(--s1)"/>
+<text x="298.5" y="306.0" class="m" text-anchor="middle" >100</text>
+<path d="M336.2,290.0 L336.2,182.7 Q336.2,179.7 339.2,179.7 L345.2,179.7 Q348.2,179.7 348.2,182.7 L348.2,290.0 Z" style="fill:var(--s1)"/>
+<text x="349.2" y="306.0" class="m" text-anchor="middle" >150</text>
+<path d="M387.0,290.0 L387.0,174.8 Q387.0,171.8 390.0,171.8 L396.0,171.8 Q399.0,171.8 399.0,174.8 L399.0,290.0 Z" style="fill:var(--s1)"/>
+<path d="M401.0,290.0 L401.0,210.0 Q401.0,207.0 404.0,207.0 L410.0,207.0 Q413.0,207.0 413.0,210.0 L413.0,290.0 Z" style="fill:var(--s2)"/>
+<text x="400.0" y="306.0" class="m" text-anchor="middle" >200</text>
+<path d="M437.8,290.0 L437.8,191.0 Q437.8,188.0 440.8,188.0 L446.8,188.0 Q449.8,188.0 449.8,191.0 L449.8,290.0 Z" style="fill:var(--s1)"/>
+<text x="450.8" y="306.0" class="m" text-anchor="middle" >300</text>
+<path d="M488.5,290.0 L488.5,206.3 Q488.5,203.3 491.5,203.3 L497.5,203.3 Q500.5,203.3 500.5,206.3 L500.5,290.0 Z" style="fill:var(--s1)"/>
+<text x="501.5" y="306.0" class="m" text-anchor="middle" >400</text>
+<path d="M539.3,290.0 L539.3,229.4 Q539.3,226.4 542.3,226.4 L548.3,226.4 Q551.3,226.4 551.3,229.4 L551.3,290.0 Z" style="fill:var(--s1)"/>
+<text x="552.3" y="306.0" class="m" text-anchor="middle" >500</text>
+<path d="M590.1,290.0 L590.1,248.7 Q590.1,245.7 593.1,245.7 L599.1,245.7 Q602.1,245.7 602.1,248.7 L602.1,290.0 Z" style="fill:var(--s1)"/>
+<text x="603.1" y="306.0" class="m" text-anchor="middle" >750</text>
+<path d="M640.8,290.0 L640.8,263.3 Q640.8,260.3 643.8,260.3 L649.8,260.3 Q652.8,260.3 652.8,263.3 L652.8,290.0 Z" style="fill:var(--s1)"/>
+<text x="653.8" y="306.0" class="m" text-anchor="middle" >1000</text>
+<text x="704.6" y="306.0" class="m" text-anchor="middle" >&gt;1000</text>
+<text x="400.0" y="326.0" class="m" text-anchor="middle" >bucket upper bound (ms): a gap of 18 ms falls in the 25 bucket</text>
+<text x="24.0" y="348.0" class="l" text-anchor="start" >Client gaps: 2445; server samples: 4080. Gaps over 50 ms appear on the client but rarely on the server.</text>
+</svg>

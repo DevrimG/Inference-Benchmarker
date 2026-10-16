@@ -11,12 +11,14 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 import numpy as np
 from rich.console import Console
 from rich.table import Table
 from tabulate import tabulate
+
+from . import stats as run_stats
 
 
 class ErrorCategory(Enum):
@@ -41,6 +43,53 @@ class ErrorCategory(Enum):
         if 400 <= status_code < 500:
             return cls.CLIENT_ERROR
         return cls.UNKNOWN
+
+
+EXCEL_CELL_LIMIT = 32_000  # Excel caps a cell at 32,767 characters
+_MEDIA_MIN_CHARS = 1024
+
+
+def redact_media(value: Any) -> Any:
+    """Copy of a request body with embedded base64 media replaced by a digest.
+
+    Text, parameters and structure are kept; ``data:...;base64,...`` URIs and
+    other long base64 strings (image or audio bytes) become
+    ``<media sha256=... chars=...>`` so exports stay small and comparable.
+    """
+    import base64
+    import binascii
+    import hashlib
+
+    if isinstance(value, dict):
+        return {key: redact_media(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_media(item) for item in value]
+    if isinstance(value, str) and len(value) >= _MEDIA_MIN_CHARS:
+        body = value.split(";base64,", 1)[1] if value.startswith("data:") and ";base64," in value else value
+        try:
+            base64.b64decode(body[:4096 - 4096 % 4], validate=True)
+        except (binascii.Error, ValueError):
+            return value
+        prefix = value.split(",", 1)[0] + "," if value.startswith("data:") else ""
+        digest = hashlib.sha256(value.encode()).hexdigest()[:16]
+        return f"{prefix}<media sha256={digest} chars={len(value)}>"
+    return value
+
+
+class ChunkRecord(NamedTuple):
+    """One raw read from the response body.
+
+    ``t`` is the client monotonic arrival time, ``events`` the complete SSE
+    events finished by this read, ``token_events`` how many of those carried
+    output, and ``cumulative_tokens`` the server's running completion-token
+    count when ``continuous_usage_stats`` supplied one in this read.
+    """
+
+    t: float
+    nbytes: int
+    events: int
+    token_events: int
+    cumulative_tokens: int | None
 
 
 @dataclass
@@ -79,7 +128,153 @@ class RequestMetrics:
     first_output_kind: str | None = None
     response_mode: str | None = None
     response_content_type: str = ""
+    response_headers: list[dict[str, str]] = field(default_factory=list)
+    response_header_redactions: list[dict[str, Any]] = field(default_factory=list)
     token_count_source: str = "character_estimate"
+    fixture_id: str | None = None
+    endpoint_label: str | None = None
+    # Intended send time from the arrival schedule (or the closed-loop rate
+    # cap). None for an uncapped closed loop, which has no intended schedule.
+    scheduled_time: float | None = None
+    chunk_records: list[ChunkRecord] = field(default_factory=list, repr=False)
+    is_warmup: bool = False
+    # The JSON body that was sent (media redacted); never includes headers.
+    request_payload: dict[str, Any] | None = field(default=None, repr=False)
+
+    # -- per-read derivations -------------------------------------------------
+    def token_timeline(self) -> list[tuple[float, int]]:
+        """(arrival time, cumulative completion tokens) for every output read.
+
+        Uses the server's continuous usage count when present. Otherwise each
+        output-bearing SSE event counts as one token; when the server reported
+        a final total, that event count is scaled to it, which assumes tokens
+        are spread evenly over events (servers that stream several tokens per
+        event, such as MTP/speculative decoding, would otherwise be undercounted).
+        """
+        timeline: list[tuple[float, float]] = []
+        cumulative = 0.0
+        for record in self.chunk_records:
+            if record.cumulative_tokens is not None:
+                if record.token_events:
+                    cumulative = max(cumulative, record.cumulative_tokens)
+                    timeline.append((record.t, cumulative))
+                else:
+                    cumulative = max(cumulative, record.cumulative_tokens)
+            elif record.token_events:
+                cumulative += record.token_events
+                timeline.append((record.t, cumulative))
+        scale = self._final_usage_scale(timeline)
+        if scale is not None:
+            timeline = [(at, count * scale) for at, count in timeline]
+        return timeline
+
+    def _final_usage_scale(self, timeline: list[tuple[float, float]]) -> float | None:
+        """Factor mapping event counts onto the server's final token total."""
+        if self.token_count_source != "provider_usage" or not timeline:
+            return None
+        if any(r.cumulative_tokens is not None for r in self.chunk_records if r.token_events):
+            return None
+        events = timeline[-1][1]
+        target = float(self.tokens_generated)
+        reasoning = int(
+            ((self.provider_usage.get("completion_tokens_details") or {}).get("reasoning_tokens"))
+            or 0
+        )
+        if reasoning and not self.reasoning_content:
+            # Reasoning was counted but not streamed: it is not in the events.
+            target -= reasoning
+        if events <= 0 or target <= events:
+            return None
+        return target / events
+
+    @property
+    def token_timeline_source(self) -> str:
+        token_reads = [r for r in self.chunk_records if r.token_events]
+        if not token_reads:
+            return "unavailable"
+        with_usage = sum(1 for r in token_reads if r.cumulative_tokens is not None)
+        if with_usage == len(token_reads):
+            return "continuous_usage"
+        if with_usage == 0:
+            if self._final_usage_scale(self.token_timeline_unscaled()) is not None:
+                return "sse_event_count_scaled_to_final_usage"
+            return "sse_event_count_estimate"
+        return "mixed_usage_and_event_count"
+
+    def token_timeline_unscaled(self) -> list[tuple[float, float]]:
+        cumulative = 0.0
+        out: list[tuple[float, float]] = []
+        for record in self.chunk_records:
+            if record.token_events and record.cumulative_tokens is None:
+                cumulative += record.token_events
+                out.append((record.t, cumulative))
+        return out
+
+    @property
+    def chunk_gaps(self) -> list[float]:
+        """Time between consecutive output-bearing reads."""
+        timeline = self.token_timeline()
+        return [b[0] - a[0] for a, b in zip(timeline, timeline[1:])]
+
+    @property
+    def itl_values(self) -> list[float]:
+        """Per-token inter-token latency: each read gap over the tokens it carried."""
+        timeline = self.token_timeline()
+        values: list[float] = []
+        for (t0, c0), (t1, c1) in zip(timeline, timeline[1:]):
+            if c1 > c0:
+                # Weight each gap by the tokens it carried (rounded when the
+                # timeline is scaled from event counts).
+                values.extend([(t1 - t0) / (c1 - c0)] * max(1, round(c1 - c0)))
+        return values
+
+    @property
+    def max_stall(self) -> float | None:
+        gaps = self.chunk_gaps
+        return max(gaps) if gaps else None
+
+    @property
+    def decode_tokens(self) -> int | None:
+        timeline = self.token_timeline()
+        if len(timeline) < 2:
+            return None
+        return timeline[-1][1] - timeline[0][1]
+
+    @property
+    def decode_duration(self) -> float | None:
+        timeline = self.token_timeline()
+        if len(timeline) < 2:
+            return None
+        return timeline[-1][0] - timeline[0][0]
+
+    @property
+    def decode_tokens_per_second(self) -> float | None:
+        """Per-user decode rate from the first to the last output read."""
+        tokens, duration = self.decode_tokens, self.decode_duration
+        if not tokens or not duration or duration <= 0:
+            return None
+        return tokens / duration
+
+    @property
+    def schedule_lag(self) -> float | None:
+        if self.scheduled_time is None:
+            return None
+        return self.start_time - self.scheduled_time
+
+    @property
+    def latency_from_intended(self) -> float | None:
+        """Latency measured from the intended send time (coordinated-omission corrected)."""
+        if self.end_time is None or self.scheduled_time is None:
+            return None
+        return self.end_time - min(self.start_time, self.scheduled_time)
+
+    def chunk_records_export(self) -> list[list[Any]]:
+        """Raw reads as [seconds since send, bytes, events, token_events, cumulative_tokens]."""
+        return [
+            [round(r.t - self.start_time, 6), r.nbytes, r.events, r.token_events,
+             r.cumulative_tokens]
+            for r in self.chunk_records
+        ]
 
     @property
     def ttfb(self) -> float | None:
@@ -182,13 +377,17 @@ class RequestMetrics:
     
     @property
     def tpot(self) -> float | None:
-        """Time Per Output Token in seconds."""
-        if self.tokens_generated > 0 and self.total_latency is not None:
-            # Exclude TTFT from TPOT calculation
-            if self.ttft is not None:
-                return (self.total_latency - self.ttft) / self.tokens_generated
-            return self.total_latency / self.tokens_generated
-        return None
+        """Time per output token after the first output read, in seconds.
+
+        Decode time (first to last output read) divided by the tokens that
+        arrived after the first read. Tokens in the first read, including any
+        reasoning tokens generated before it, are excluded. None for buffered
+        responses and single-read streams, which have no decode interval.
+        """
+        tokens, duration = self.decode_tokens, self.decode_duration
+        if not tokens or duration is None:
+            return None
+        return duration / tokens
     
     @property
     def tokens_per_second(self) -> float | None:
@@ -246,15 +445,31 @@ class RequestMetrics:
             "input_tokens": self.input_tokens,
             "tokens_per_second": self.tokens_per_second,
             "token_count_source": self.token_count_source,
+            "token_timeline_source": self.token_timeline_source,
+            "fixture_id": self.fixture_id,
+            "endpoint": self.endpoint_label,
+            "scheduled_time": self.scheduled_time,
+            "schedule_lag_seconds": self.schedule_lag,
+            "latency_from_intended_seconds": self.latency_from_intended,
+            "decode_tokens": self.decode_tokens,
+            "decode_seconds": self.decode_duration,
+            "decode_tokens_per_second": self.decode_tokens_per_second,
+            "itl_p50_seconds": run_stats.percentile(self.itl_values, 50),
+            "itl_p99_seconds": run_stats.percentile(self.itl_values, 99),
+            "max_stall_seconds": self.max_stall,
+            "chunk_reads": len(self.chunk_records),
             "responsiveness_metric_type": self.responsiveness_metric_type,
             "available_responsiveness_metrics": self.available_responsiveness_metrics,
             "measurement_basis": self.measurement_basis,
             "first_output_kind": self.first_output_kind,
             "response_mode": self.response_mode,
             "response_content_type": self.response_content_type,
+            "response_headers": self.response_headers,
+            "response_header_redactions": self.response_header_redactions,
             "error": self.error.value,
             "error_message": self.error_message,
             "status_code": self.status_code,
+            "request_payload": self.request_payload,
             "response_content": self.response_content,
             "reasoning_content": self.reasoning_content,
         }
@@ -294,6 +509,18 @@ class BenchmarkResult:
     server_metrics: dict[str, Any] | None = None
     provider_monitoring: dict[str, Any] | None = None
     scenario_start_monotonic: float | None = field(default=None, repr=False)
+
+    # Measurement context
+    arrival_mode: str = "closed"
+    arrival_schedule: dict[str, Any] | None = None
+    client_self_check: dict[str, Any] | None = None
+    manifest: dict[str, Any] | None = None
+    slo: dict[str, Any] | None = None
+    endpoint_label: str | None = None
+    stream_usage_effective: str | None = None
+    _measurement_cache: tuple[Any, dict[str, Any]] | None = field(
+        default=None, repr=False, compare=False
+    )
     
     # Error tracking
     errors: dict[ErrorCategory, int] = field(default_factory=lambda: {
@@ -518,8 +745,238 @@ class BenchmarkResult:
                 cat.value: count for cat, count in self.errors.items() if count > 0
             }
         }
-        
+        summary.update(self.measurement_summary())
         return summary
+
+    # -- measurement summary --------------------------------------------------
+    def _token_arrivals(self, metric: RequestMetrics) -> list[tuple[float, int]]:
+        """(time, tokens) increments that add up to ``tokens_generated``.
+
+        Tokens the timeline cannot place (for example final usage exceeding an
+        event-count estimate, or a buffered response) are attributed to the
+        last output read or the end of the request.
+        """
+        arrivals: list[tuple[float, int]] = []
+        previous = 0
+        for at, cumulative in metric.token_timeline():
+            if cumulative > previous:
+                arrivals.append((at, cumulative - previous))
+                previous = cumulative
+        residual = metric.tokens_generated - previous
+        if residual > 0:
+            at = arrivals[-1][0] if arrivals else metric.end_time
+            if at is not None:
+                arrivals.append((at, residual))
+        return arrivals
+
+    def _window_throughput(
+        self, metrics: list[RequestMetrics], window: tuple[float, float] | None
+    ) -> dict[str, Any]:
+        if window is None:
+            return {"available": False}
+        start, end = window
+        duration = end - start
+        if duration <= 0:
+            return {"available": False}
+        tokens = sum(
+            count
+            for metric in metrics
+            for at, count in self._token_arrivals(metric)
+            if start <= at <= end
+        )
+        completed = [m for m in metrics if m.end_time is not None and start <= m.end_time <= end]
+        return {
+            "available": True,
+            "start_seconds": round(start - (self.scenario_start_monotonic or start), 6),
+            "end_seconds": round(end - (self.scenario_start_monotonic or start), 6),
+            "duration_seconds": round(duration, 6),
+            "output_tokens": tokens,
+            "output_tokens_per_second": round(tokens / duration, 3),
+            "requests_completed": len(completed),
+            "requests_per_second": round(len(completed) / duration, 4),
+        }
+
+    def measurement_summary(self) -> dict[str, Any]:
+        """Window-aware throughput, distributions with CIs, goodput, Little's law."""
+        cache_key = (
+            len(self.request_metrics),
+            self.end_time,
+            self.client_self_check is not None,
+            id(self.server_metrics),
+            json.dumps(self.slo, sort_keys=True, default=str),
+        )
+        if self._measurement_cache and self._measurement_cache[0] == cache_key:
+            return self._measurement_cache[1]
+
+        measured = [m for m in self.request_metrics if m.end_time is not None]
+        ok = [m for m in measured if m.error == ErrorCategory.NONE]
+        intervals = [(m.start_time, m.end_time) for m in measured]
+
+        def pooled(extractor) -> list[float]:
+            return [v for m in ok for v in extractor(m)]
+
+        def per_request(extractor) -> list[float]:
+            return [v for m in ok if (v := extractor(m)) is not None]
+
+        distributions = {
+            "ttft_s": run_stats.describe(per_request(lambda m: m.ttft)),
+            "ttfb_s": run_stats.describe(per_request(lambda m: m.ttfb)),
+            "latency_s": run_stats.describe(per_request(lambda m: m.total_latency)),
+            "tpot_s": run_stats.describe(per_request(lambda m: m.tpot)),
+            "itl_s": run_stats.describe(pooled(lambda m: m.itl_values)),
+            "chunk_gap_s": run_stats.describe(pooled(lambda m: m.chunk_gaps)),
+            "max_stall_s": run_stats.describe(per_request(lambda m: m.max_stall)),
+            "decode_tokens_per_second": run_stats.describe(
+                per_request(lambda m: m.decode_tokens_per_second)
+            ),
+            "schedule_lag_s": run_stats.describe(
+                [v for m in measured if (v := m.schedule_lag) is not None]
+            ),
+            "latency_from_intended_s": run_stats.describe(
+                per_request(lambda m: m.latency_from_intended)
+            ),
+        }
+
+        start = self.scenario_start_monotonic
+        last_end = max((m.end_time for m in measured), default=None)
+        full_window = (start, last_end) if start is not None and last_end else None
+        if self.arrival_mode in ("closed", "burst"):
+            steady_window = run_stats.steady_state_window(intervals, self.concurrency)
+            steady_definition = f"in_flight >= {self.concurrency}"
+        else:
+            starts = [m.start_time for m in measured]
+            steady_window = (min(starts), max(starts)) if len(starts) > 1 else None
+            steady_definition = "first to last scheduled arrival (open loop)"
+        steady = self._window_throughput(measured, steady_window)
+        steady["definition"] = steady_definition
+
+        sources: dict[str, int] = {}
+        for metric in measured:
+            sources[metric.token_count_source] = sources.get(metric.token_count_source, 0) + 1
+        estimated = sum(
+            count for source, count in sources.items() if "estimate" in source
+        )
+
+        lags = [m.schedule_lag for m in measured if m.schedule_lag is not None]
+        interval_s = (1.0 / self.target_rps) if self.target_rps and self.target_rps > 0 else 0.0
+        threshold = max(0.01, interval_s)
+        coordinated = {
+            "schedule": (
+                "open_loop_precomputed" if self.arrival_mode != "closed"
+                else "closed_loop_rate_cap" if self.target_rps and self.target_rps > 0
+                else "none_closed_loop"
+            ),
+            "lag_threshold_seconds": threshold,
+            "affected_requests": sum(1 for lag in lags if lag > threshold),
+            "note": (
+                "Uncapped closed loop has no intended send times; latency is what each "
+                "worker saw and omits queueing a real arrival process would add."
+                if not lags else
+                "latency_from_intended_s measures from the intended send time."
+            ),
+        }
+
+        littles = (
+            run_stats.littles_law(intervals, steady_window)
+            if steady_window else {"available": False}
+        )
+
+        result: dict[str, Any] = {
+            "arrival_mode": self.arrival_mode,
+            "arrival_schedule": self.arrival_schedule,
+            "full_window": self._window_throughput(measured, full_window),
+            "steady_state": steady,
+            "distributions": distributions,
+            "itl_p50": distributions["itl_s"]["p50"],
+            "itl_p99": distributions["itl_s"]["p99"],
+            "max_stall_max": distributions["max_stall_s"]["max"],
+            "decode_tokens_per_second_p5": distributions["decode_tokens_per_second"]["p5"],
+            "decode_tokens_per_second_p50": distributions["decode_tokens_per_second"]["p50"],
+            "token_count_sources": sources,
+            "token_count_estimated_requests": estimated,
+            "token_count_note": (
+                f"{estimated} request(s) have estimated token counts (no server usage)."
+                if estimated else "All token counts are server-reported."
+            ),
+            "stream_usage_effective": self.stream_usage_effective,
+            "coordinated_omission": coordinated,
+            "littles_law": littles,
+            "client_self_check": self.client_self_check,
+        }
+        if self.slo:
+            result["goodput"] = self._goodput(ok, measured, full_window, distributions)
+        if self.server_metrics:
+            from .agreement import server_agreement
+
+            per_endpoint = self.server_metrics.get("per_endpoint")
+            if isinstance(per_endpoint, dict):
+                result["server_agreement"] = {
+                    label: server_agreement(
+                        [m for m in measured if m.endpoint_label == label], metrics
+                    )
+                    for label, metrics in per_endpoint.items()
+                }
+            else:
+                result["server_agreement"] = server_agreement(measured, self.server_metrics)
+        self._measurement_cache = (cache_key, result)
+        return result
+
+    def _goodput(
+        self,
+        ok: list[RequestMetrics],
+        measured: list[RequestMetrics],
+        window: tuple[float, float] | None,
+        distributions: dict[str, Any],
+    ) -> dict[str, Any]:
+        slo = self.slo or {}
+        ttft_limit = slo.get("ttft_p95_s")
+        decode_floor = slo.get("decode_p5_tok_s")
+        stall_limit = slo.get("max_stall_s")
+
+        def good(metric: RequestMetrics) -> bool:
+            if ttft_limit is not None and (metric.ttft is None or metric.ttft > ttft_limit):
+                return False
+            rate = metric.decode_tokens_per_second
+            if decode_floor is not None and (rate is None or rate < decode_floor):
+                return False
+            stall = metric.max_stall
+            if stall_limit is not None and stall is not None and stall > stall_limit:
+                return False
+            return True
+
+        good_count = sum(1 for metric in ok if good(metric))
+        duration = (window[1] - window[0]) if window else None
+        ttft_p95 = distributions["ttft_s"]["p95"]
+        decode_p5 = distributions["decode_tokens_per_second"]["p5"]
+        stall_p99 = distributions["max_stall_s"]["p99"]
+        checks = {
+            "ttft_p95": {"limit": ttft_limit, "value": ttft_p95,
+                         "pass": None if ttft_limit is None or ttft_p95 is None
+                         else ttft_p95 <= ttft_limit},
+            "decode_p5": {"limit": decode_floor, "value": decode_p5,
+                          "pass": None if decode_floor is None or decode_p5 is None
+                          else decode_p5 >= decode_floor},
+            "max_stall_p99": {"limit": stall_limit, "value": stall_p99,
+                              "pass": None if stall_limit is None or stall_p99 is None
+                              else stall_p99 <= stall_limit},
+        }
+        verdicts = [check["pass"] for check in checks.values() if check["pass"] is not None]
+        return {
+            "slo": slo,
+            "good_requests": good_count,
+            "measured_requests": len(measured),
+            "good_fraction": round(good_count / len(measured), 4) if measured else None,
+            "goodput_requests_per_second": (
+                round(good_count / duration, 4) if duration else None
+            ),
+            "run_checks": checks,
+            "run_slo_pass": all(verdicts) if verdicts else None,
+            "definition": (
+                "A request is good when its TTFT <= ttft_p95_s, decode rate >= "
+                "decode_p5_tok_s and max stall <= max_stall_s. The run passes when "
+                "TTFT p95, decode p5 and max-stall p99 meet the same limits."
+            ),
+        }
 
     def get_summary_units(self) -> dict[str, str]:
         """Return explicit units for numeric summary fields without renaming keys."""
@@ -568,6 +1025,8 @@ class BenchmarkResult:
                         "provider_internal_ttfb_",
                         "ttft_",
                         "latency_",
+                        "itl_",
+                        "max_stall_",
                     )
                 )
                 and not metric_name.endswith(("_source", "_note"))
@@ -737,9 +1196,16 @@ class BenchmarkResult:
         export_data = {
             "summary": self.get_summary(),
             "summary_units": self.get_summary_units(),
-            "raw_metrics": [m.to_dict() for m in self.request_metrics],
+            "raw_metrics": [
+                {**m.to_dict(), "chunk_records": m.chunk_records_export()}
+                for m in self.request_metrics
+            ],
+            "chunk_record_columns": [
+                "seconds_since_send", "bytes", "events", "token_events", "cumulative_tokens"
+            ],
             "server_metrics": self.server_metrics,
             "provider_monitoring": self.provider_monitoring,
+            "manifest": self.manifest,
         }
         
         with open(filepath, "w") as f:
@@ -768,7 +1234,11 @@ class BenchmarkResult:
 
         def excel_value(value: Any) -> Any:
             if isinstance(value, (dict, list, tuple, set)):
-                return json.dumps(value, sort_keys=True, ensure_ascii=False)
+                value = json.dumps(value, sort_keys=True, ensure_ascii=False)
+            if isinstance(value, str) and len(value) > EXCEL_CELL_LIMIT:
+                return value[:EXCEL_CELL_LIMIT] + f"... [truncated, {len(value)} chars; see JSON export]"
+            if isinstance(value, str):
+                return value
             if isinstance(value, Enum):
                 return value.value
             if isinstance(value, datetime):

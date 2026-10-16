@@ -1,5 +1,0 @@
-task mode: create
-primary deck-profile: engineering-platform
-required proof objects: benchmark topology note, metric evidence slides, risk/reliability view, scenario detail appendix
-source: outputs/benchmark_report/normalized_benchmark_runs.csv
-brand constraints: Huawei-inspired red/black/white, no official logo asset assumed

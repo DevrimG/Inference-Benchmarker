@@ -36,6 +36,11 @@ url = "http://10.0.0.11:8000"
 metrics_url = "http://10.0.0.11:8000/metrics"
 weight = 1
 
+# TLS for endpoints without a publicly trusted certificate (per endpoint):
+#   tls_ca_file = "certs/node1.pem"   # pin the server's own self-signed cert
+#   tls_check_hostname = false        # needed when that cert names no host/IP
+#   tls_verify = false                # accept any certificate (insecure)
+
 [[endpoints]]
 label = "a2-node2"
 url = "http://10.0.0.12:8000"

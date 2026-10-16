@@ -7,6 +7,7 @@ Core benchmark engine for asynchronous LLM load testing.
 import asyncio
 import codecs
 import json
+import ssl
 import time
 from dataclasses import dataclass, fields
 from datetime import datetime
@@ -97,8 +98,25 @@ class LoadTestConfig:
     schedule_log_path: str | None = None
     self_check: bool = True
     show_progress: bool = True
+    # TLS. Default: normal certificate and hostname verification.
+    # tls_ca_file trusts a specific CA or a pinned self-signed certificate;
+    # tls_check_hostname=False is needed when that certificate names no host.
+    # tls_verify=False accepts any certificate (insecure; opt-in per endpoint).
+    tls_verify: bool = True
+    tls_ca_file: str | None = None
+    tls_check_hostname: bool = True
     # Shared StartGate for multi-endpoint fan-out.
     start_gate: Any = None
+
+    def ssl_option(self) -> ssl.SSLContext | bool | None:
+        """Value for aiohttp's ``ssl=`` argument."""
+        if not self.tls_verify:
+            return False
+        if self.tls_ca_file or not self.tls_check_hostname:
+            context = ssl.create_default_context(cafile=self.tls_ca_file)
+            context.check_hostname = self.tls_check_hostname
+            return context
+        return None
 
     def snapshot(self) -> dict[str, Any]:
         """Config values safe to persist: no credentials, no live objects."""
@@ -912,6 +930,7 @@ class LLMBenchmarker:
             limit=limit,
             limit_per_host=limit,
             force_close=self.config.cold_connections,
+            ssl=self.config.ssl_option(),
         )
 
     async def run(self) -> BenchmarkResult:
@@ -942,6 +961,12 @@ class LLMBenchmarker:
             border_style="cyan"
         ))
 
+        if not self.config.tls_verify:
+            self.console.print(
+                "[bold yellow]TLS certificate verification is OFF for "
+                f"{self.config.endpoint}: traffic, including the API key, can be "
+                "intercepted.[/bold yellow]"
+            )
         capacity = (
             measure_event_capacity(self._selfcheck_parser()) if self.config.self_check else None
         )
@@ -950,7 +975,9 @@ class LLMBenchmarker:
         # Monitoring (probes, /metrics, Cloud Eye) uses its own pool so it never
         # waits behind, or takes a connection from, the measured requests.
         async with aiohttp.ClientSession(connector=connector) as session, \
-                aiohttp.ClientSession() as monitor_session:
+                aiohttp.ClientSession(
+                    connector=aiohttp.TCPConnector(ssl=self.config.ssl_option())
+                ) as monitor_session:
             server_probe = await probe_server(
                 monitor_session, self.config.endpoint, self.config.api_key
             )

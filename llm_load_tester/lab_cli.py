@@ -76,6 +76,9 @@ def build_base_config(cfg: dict[str, Any]) -> tuple[LoadTestConfig, list[Endpoin
             weight=float(e.get("weight", 1.0)),
             api_key=_env(e.get("api_key_env")),
             metrics_api_key=_env(e.get("metrics_api_key_env")),
+            tls_verify=bool(e.get("tls_verify", True)),
+            tls_ca_file=e.get("tls_ca_file") or None,
+            tls_check_hostname=bool(e.get("tls_check_hostname", True)),
         )
         for i, e in enumerate(endpoints_cfg)
     ]

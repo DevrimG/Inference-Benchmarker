@@ -180,7 +180,13 @@ CANONICAL_COUNTERS: dict[str, tuple[str, ...]] = {
     "successful_requests": ("vllm:request_success_total",),
     "preemptions": ("vllm:num_preemptions_total",),
     "prefix_cache_hits": ("vllm:prefix_cache_hits_total", "vllm:gpu_prefix_cache_hits_total"),
-    "prefix_cache_queries": ("vllm:prefix_cache_queries_total",),
+    "prefix_cache_queries": (
+        "vllm:prefix_cache_queries_total",
+        "vllm:gpu_prefix_cache_queries_total",
+    ),
+    "spec_decode_drafts": ("vllm:spec_decode_num_drafts_total",),
+    "spec_decode_draft_tokens": ("vllm:spec_decode_num_draft_tokens_total",),
+    "spec_decode_accepted_tokens": ("vllm:spec_decode_num_accepted_tokens_total",),
 }
 
 CANONICAL_GAUGES: dict[str, tuple[str, ...]] = {
@@ -198,6 +204,9 @@ CANONICAL_HISTOGRAMS: dict[str, tuple[str, ...]] = {
         "vllm:inter_token_latency_seconds",
         "infer_service_per_token_cost",
     ),
+    # vLLM observes one ITL sample per decode step per request, so with MTP or
+    # speculative decoding a sample spans every token emitted in that step.
+    "itl": ("vllm:inter_token_latency_seconds",),
     "e2e_latency": ("vllm:e2e_request_latency_seconds", "infer_service_request_cost"),
     "queue_time": ("vllm:request_queue_time_seconds",),
     "prefill_time": ("vllm:request_prefill_time_seconds",),
@@ -402,7 +411,30 @@ def summarize_snapshots(
         "counters": counter_summary,
         "gauges": gauge_summary,
         "histograms": histogram_summary,
+        "derived": derive_rates(counter_summary),
     }, warnings
+
+
+def derive_rates(counters: dict[str, Any]) -> dict[str, Any]:
+    """Ratios that are only meaningful as scenario deltas."""
+
+    def delta(name: str) -> float | None:
+        entry = counters.get(name)
+        return entry.get("delta") if entry else None
+
+    derived: dict[str, Any] = {}
+    hits, queries = delta("prefix_cache_hits"), delta("prefix_cache_queries")
+    if hits is not None and queries:
+        derived["prefix_cache_hit_rate"] = hits / queries
+    accepted = delta("spec_decode_accepted_tokens")
+    drafted = delta("spec_decode_draft_tokens")
+    drafts = delta("spec_decode_drafts")
+    if accepted is not None and drafted:
+        derived["spec_decode_acceptance_rate"] = accepted / drafted
+    if accepted is not None and drafts:
+        # Tokens emitted per decode step: the bonus token plus accepted drafts.
+        derived["spec_decode_mean_acceptance_length"] = 1 + accepted / drafts
+    return derived
 
 
 @dataclass

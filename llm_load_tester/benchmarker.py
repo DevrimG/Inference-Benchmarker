@@ -7,8 +7,9 @@ Core benchmark engine for asynchronous LLM load testing.
 import asyncio
 import codecs
 import json
+import ssl
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from typing import Any
 
@@ -17,13 +18,44 @@ from rich.console import Console
 from rich.progress import Progress, TaskID
 from rich.panel import Panel
 
-from .metrics import BenchmarkResult, ErrorCategory, RequestMetrics
+from .arrival import ArrivalSchedule, build_schedule
+from .fixtures import FixtureHandler, payload_fingerprint
+from .manifest import build_manifest, probe_server
+from .metrics import BenchmarkResult, ChunkRecord, ErrorCategory, RequestMetrics, redact_media
+from .selfcheck import LagMonitor, build_report, measure_event_capacity, peak_event_rate
 from .modelarts_monitoring import ModelArtsCloudEyeCollector, ModelArtsCloudEyeConfig
 from .modalities import ModalityHandler, PayloadResult
 from .server_metrics import (
     PrometheusMetricsConfig,
     ScenarioMetricsCollector,
 )
+
+
+_REDACTED_HEADER_VALUE = "[REDACTED]"
+_SENSITIVE_RESPONSE_HEADER_NAMES = frozenset({
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "cookie2",
+    "set-cookie",
+    "set-cookie2",
+    "api-key",
+    "apikey",
+    "x-api-key",
+    "x-apikey",
+    "api-token",
+    "x-api-token",
+    "access-token",
+    "x-access-token",
+    "refresh-token",
+    "x-refresh-token",
+    "auth-token",
+    "x-auth-token",
+    "client-key",
+    "x-client-key",
+    "client-secret",
+    "x-client-secret",
+})
 
 
 @dataclass
@@ -46,6 +78,94 @@ class LoadTestConfig:
     metrics_api_key: str | None = None
     metrics_strict: bool = False
     modelarts_cloud_eye: ModelArtsCloudEyeConfig | None = None
+    # Arrival process; see arrival.py. "closed" keeps the original behaviour.
+    arrival_mode: str = "closed"
+    arrival_rate: float | None = None
+    arrival_shape: float = 1.0
+    arrival_seed: int | None = None
+    replay_file: str | None = None
+    # Run for this long instead of a fixed request count (soak mode).
+    duration_seconds: float | None = None
+    # Open a new TCP/TLS connection for every request.
+    cold_connections: bool = False
+    # "continuous": include_usage + continuous_usage_stats; "final": usage only
+    # at the end; "off": leave the payload's stream_options untouched.
+    stream_usage: str = "continuous"
+    slo: dict[str, Any] | None = None
+    endpoint_label: str | None = None
+    tokenizer: str | None = None
+    image_digest: str | None = None
+    schedule_log_path: str | None = None
+    self_check: bool = True
+    show_progress: bool = True
+    # Store each request body (media redacted) in the exports.
+    record_request_payload: bool = True
+    # TLS. Default: normal certificate and hostname verification.
+    # tls_ca_file trusts a specific CA or a pinned self-signed certificate;
+    # tls_check_hostname=False is needed when that certificate names no host.
+    # tls_verify=False accepts any certificate (insecure; opt-in per endpoint).
+    tls_verify: bool = True
+    tls_ca_file: str | None = None
+    tls_check_hostname: bool = True
+    # Shared StartGate for multi-endpoint fan-out.
+    start_gate: Any = None
+
+    def ssl_option(self) -> ssl.SSLContext | bool | None:
+        """Value for aiohttp's ``ssl=`` argument."""
+        if not self.tls_verify:
+            return False
+        if self.tls_ca_file or not self.tls_check_hostname:
+            context = ssl.create_default_context(cafile=self.tls_ca_file)
+            context.check_hostname = self.tls_check_hostname
+            return context
+        return None
+
+    def snapshot(self) -> dict[str, Any]:
+        """Config values safe to persist: no credentials, no live objects."""
+        skip = {"api_key", "metrics_api_key", "modality_handler", "start_gate",
+                "modelarts_cloud_eye"}
+        out: dict[str, Any] = {}
+        for item in fields(self):
+            if item.name in skip:
+                continue
+            value = getattr(self, item.name)
+            out[item.name] = json.loads(json.dumps(value, default=str))
+        out["modality_handler"] = type(self.modality_handler).__name__
+        out["api_key_set"] = bool(self.api_key)
+        return out
+
+
+class StartGate:
+    """Releases every participant at one common monotonic instant.
+
+    Each endpoint's benchmarker finishes its warmup and its "before" metrics
+    scrape, then waits here. When the last one arrives the gate picks a start
+    time slightly in the future so all participants begin together and share
+    one time origin.
+    """
+
+    def __init__(self, parties: int, lead_seconds: float = 0.05) -> None:
+        self.parties = parties
+        self.lead_seconds = lead_seconds
+        self.arrived = 0
+        self.start_monotonic: float | None = None
+        self.start_epoch: float | None = None
+        self._event: asyncio.Event | None = None
+
+    async def wait(self) -> float:
+        if self._event is None:
+            self._event = asyncio.Event()
+        self.arrived += 1
+        if self.arrived >= self.parties:
+            self.start_monotonic = time.monotonic() + self.lead_seconds
+            self.start_epoch = time.time() + self.lead_seconds
+            self._event.set()
+        await self._event.wait()
+        assert self.start_monotonic is not None
+        delay = self.start_monotonic - time.monotonic()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        return self.start_monotonic
 
 
 class SSEDecoder:
@@ -154,6 +274,9 @@ class AsyncRateLimiter:
                 wait_time = (1 - self.tokens) / self.target_rps
                 await asyncio.sleep(wait_time)
                 self.tokens = 0
+                # The wait has already paid for this token. Do not credit its
+                # elapsed time again on the next acquisition.
+                self.last_update = time.monotonic()
             else:
                 self.tokens -= 1
 
@@ -184,17 +307,23 @@ class LLMBenchmarker:
             audio_directory=config.modality_config.get("audio_directory"),
             audio_file=config.modality_config.get("audio_file")
         )
+        self.result.slo = config.slo
+        self.result.endpoint_label = config.endpoint_label
         self.rate_limiter = AsyncRateLimiter(config.target_rps)
         self.request_counter = 0
         self.counter_lock: asyncio.Lock | None = None
-        self.semaphore: asyncio.Semaphore | None = None
+        self.schedule: ArrivalSchedule | None = None
+        self._tokenizer: Any = None
+        self._tokenizer_failed = False
+        self.stream_usage = config.stream_usage
+        self.result.stream_usage_effective = config.stream_usage
+        if config.stream_usage not in {"continuous", "final", "off"}:
+            raise ValueError("stream_usage must be 'continuous', 'final' or 'off'")
 
     def _ensure_async_primitives(self) -> None:
         """Create asyncio synchronization primitives inside a running event loop."""
         if self.counter_lock is None:
             self.counter_lock = asyncio.Lock()
-        if self.semaphore is None:
-            self.semaphore = asyncio.Semaphore(self.config.concurrency)
         
     async def _get_next_request_id(self) -> int:
         """Get the next request ID atomically."""
@@ -207,7 +336,10 @@ class LLMBenchmarker:
         """Reserve the next benchmark request ID or return None when complete."""
         self._ensure_async_primitives()
         async with self.counter_lock:
-            if self.request_counter >= self.config.total_requests:
+            if (
+                not self.config.duration_seconds
+                and self.request_counter >= self.config.total_requests
+            ):
                 return None
             self.request_counter += 1
             return self.request_counter
@@ -317,7 +449,9 @@ class LLMBenchmarker:
         self,
         session: aiohttp.ClientSession,
         request_id: int | None = None,
-        is_warmup: bool = False
+        is_warmup: bool = False,
+        scheduled_time: float | None = None,
+        fixture_id: str | None = None,
     ) -> RequestMetrics:
         """Execute a single request and collect metrics."""
         if request_id is None:
@@ -325,18 +459,25 @@ class LLMBenchmarker:
         url = f"{self.config.endpoint}/{self.config.api_route}"
         
         # Generate a fresh unique payload for this request
-        payload_result = await self.config.modality_handler.prepare_payload(
-            {
-                **self.config.modality_config,
-                "endpoint": self.config.endpoint,
-                "api_route": self.config.api_route,
-            }
-        )
+        handler_config = {
+            **self.config.modality_config,
+            "endpoint": self.config.endpoint,
+            "api_route": self.config.api_route,
+        }
+        if fixture_id is not None:
+            handler_config["fixture_id"] = fixture_id
+        payload_result = await self.config.modality_handler.prepare_payload(handler_config)
+        payload = self._apply_stream_usage(payload_result.payload)
         
         metrics = RequestMetrics(
             request_id=request_id,
             start_time=time.monotonic(),
-            input_tokens=payload_result.metadata.get("input_tokens", 0)
+            input_tokens=payload_result.metadata.get("input_tokens", 0),
+            fixture_id=payload_result.metadata.get("fixture_id") or payload_fingerprint(payload),
+            endpoint_label=self.config.endpoint_label,
+            scheduled_time=scheduled_time,
+            is_warmup=is_warmup,
+            request_payload=redact_media(payload) if self.config.record_request_payload else None,
         )
 
         try:
@@ -346,7 +487,7 @@ class LLMBenchmarker:
                 headers["Authorization"] = f"Bearer {self.config.api_key}"
             async with session.post(
                 url,
-                json=payload_result.payload,
+                json=payload,
                 headers=headers,
                 timeout=timeout
             ) as response:
@@ -355,6 +496,10 @@ class LLMBenchmarker:
                 metrics.upstream_request_id = self._extract_upstream_request_id(response.headers)
                 metrics.upstream_span_id = self._extract_upstream_span_id(response.headers)
                 metrics.response_content_type = response.headers.get("Content-Type", "")
+                (
+                    metrics.response_headers,
+                    metrics.response_header_redactions,
+                ) = self._capture_response_headers(response)
 
                 raw_response = bytearray()
                 if response.status != 200:
@@ -366,6 +511,14 @@ class LLMBenchmarker:
                         raw_response.extend(raw_chunk)
                     metrics.error = ErrorCategory.from_status_code(response.status)
                     metrics.error_message = raw_response.decode("utf-8", errors="replace")[:200]
+                    if (
+                        response.status == 400
+                        and self.stream_usage == "continuous"
+                        and "continuous_usage_stats" in raw_response.decode("utf-8", "replace")
+                    ):
+                        # The server rejects running usage; keep final usage only.
+                        self.stream_usage = "final"
+                        self.result.stream_usage_effective = "final (continuous rejected by server)"
                     metrics.end_time = time.monotonic()
                     return metrics
 
@@ -406,7 +559,8 @@ class LLMBenchmarker:
                         if finish_reason:
                             metrics.finish_reason = str(finish_reason)
 
-                def process_event(data: str, observed_time: float) -> None:
+                def process_event(data: str, observed_time: float) -> tuple[bool, int | None]:
+                    """Handle one SSE event; return (token-bearing, usage completion tokens)."""
                     nonlocal saw_sse_event, saw_output
                     nonlocal reported_prompt_tokens, reported_completion_tokens
                     saw_sse_event = True
@@ -414,7 +568,7 @@ class LLMBenchmarker:
                         metrics.first_event_time = observed_time
                     chunk = self._parse_sse_data(data)
                     if chunk is None:
-                        return
+                        return False, None
                     capture_provider_metadata(chunk)
 
                     prompt_tokens, completion_tokens = self._extract_usage(chunk)
@@ -425,7 +579,7 @@ class LLMBenchmarker:
 
                     fragments = self._extract_output_fragments(chunk)
                     if not fragments.has_output:
-                        return
+                        return False, completion_tokens
                     saw_output = True
                     if metrics.first_output_time is None:
                         metrics.first_output_time = observed_time
@@ -447,6 +601,22 @@ class LLMBenchmarker:
                         reasoning_content_parts.append(fragments.reasoning)
                     if fragments.token_text:
                         token_text_parts.append(fragments.token_text)
+                    return bool(fragments.token_text), completion_tokens
+
+                def record_read(events: list[str], observed_time: float, nbytes: int) -> None:
+                    token_events = 0
+                    cumulative: int | None = None
+                    for event_data in events:
+                        token_bearing, usage_tokens = process_event(event_data, observed_time)
+                        token_events += int(token_bearing)
+                        # Running usage only counts when it rides on an output
+                        # event; a final usage-only event in the same read is
+                        # the total, not a per-chunk count.
+                        if token_bearing and usage_tokens is not None:
+                            cumulative = usage_tokens
+                    metrics.chunk_records.append(
+                        ChunkRecord(observed_time, nbytes, len(events), token_events, cumulative)
+                    )
 
                 async for raw_chunk in response.content.iter_any():
                     if not raw_chunk:
@@ -455,12 +625,12 @@ class LLMBenchmarker:
                     if metrics.first_byte_time is None:
                         metrics.first_byte_time = observed_time
                     raw_response.extend(raw_chunk)
-                    for event_data in decoder.feed(raw_chunk):
-                        process_event(event_data, observed_time)
+                    record_read(decoder.feed(raw_chunk), observed_time, len(raw_chunk))
 
                 final_observed_time = time.monotonic()
-                for event_data in decoder.finalize():
-                    process_event(event_data, final_observed_time)
+                final_events = decoder.finalize()
+                if final_events:
+                    record_read(final_events, final_observed_time, 0)
 
                 if saw_sse_event:
                     metrics.response_mode = "streaming"
@@ -502,10 +672,21 @@ class LLMBenchmarker:
                     metrics.token_count_source = "provider_usage"
                 else:
                     combined_output = "".join(token_text_parts)
-                    metrics.tokens_generated = (
-                        max(1, len(combined_output) // 4) if combined_output else 0
-                    )
-                    metrics.token_count_source = "character_estimate"
+                    tokenizer_count = self._tokenizer_count(combined_output)
+                    timeline = metrics.token_timeline()
+                    if tokenizer_count is not None:
+                        metrics.tokens_generated = tokenizer_count
+                        metrics.token_count_source = "tokenizer_estimate"
+                    elif timeline:
+                        # One output-bearing SSE event per token; undercounts
+                        # multi-token (MTP/speculative) chunks.
+                        metrics.tokens_generated = int(round(timeline[-1][1]))
+                        metrics.token_count_source = "sse_event_count_estimate"
+                    else:
+                        metrics.tokens_generated = (
+                            max(1, len(combined_output) // 4) if combined_output else 0
+                        )
+                        metrics.token_count_source = "character_estimate"
 
                 if not saw_output:
                     metrics.error = ErrorCategory.UNKNOWN
@@ -529,6 +710,98 @@ class LLMBenchmarker:
             metrics.end_time = time.monotonic()
         
         return metrics
+
+    def _apply_stream_usage(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Ask streaming servers for usage (and running usage) in the stream."""
+        if self.stream_usage == "off" or not payload.get("stream"):
+            return payload
+        options = dict(payload.get("stream_options") or {})
+        options.setdefault("include_usage", True)
+        if self.stream_usage == "continuous":
+            options.setdefault("continuous_usage_stats", True)
+        return {**payload, "stream_options": options}
+
+    def _tokenizer_count(self, text: str) -> int | None:
+        """Count tokens with the configured Hugging Face tokenizer, if any."""
+        if not self.config.tokenizer or self._tokenizer_failed or not text:
+            return None
+        if self._tokenizer is None:
+            try:
+                from transformers import AutoTokenizer  # type: ignore
+
+                self._tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer)
+            except Exception as exc:  # pragma: no cover - optional dependency
+                self._tokenizer_failed = True
+                self.console.print(f"[yellow]Tokenizer unavailable ({exc}); using estimates.[/yellow]")
+                return None
+        return len(self._tokenizer.encode(text, add_special_tokens=False))
+
+    def _selfcheck_parser(self):
+        decoder = SSEDecoder()
+
+        def parse(raw: bytes) -> None:
+            for event in decoder.feed(raw):
+                chunk = self._parse_sse_data(event)
+                if chunk is not None:
+                    self._extract_output_fragments(chunk)
+                    self._extract_usage(chunk)
+
+        return parse
+
+    @staticmethod
+    def _decode_raw_header_part(value: Any) -> str:
+        """Decode one raw HTTP header part without changing its spelling."""
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return bytes(value).decode("latin-1", errors="replace")
+        return str(value)
+
+    @classmethod
+    def _is_sensitive_response_header(cls, name: str) -> bool:
+        """Return whether a response header value contains credential material."""
+        normalized = name.casefold().replace("_", "-")
+        if normalized in _SENSITIVE_RESPONSE_HEADER_NAMES:
+            return True
+        if normalized.startswith("set-cookie"):
+            return True
+        return normalized.endswith((
+            "-api-key",
+            "-apikey",
+            "-auth-token",
+            "-access-token",
+            "-refresh-token",
+            "-client-secret",
+        ))
+
+    @classmethod
+    def _capture_response_headers(
+        cls,
+        response: Any,
+    ) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+        """Capture raw response headers while redacting credential values.
+
+        ``aiohttp`` exposes ``raw_headers`` as an ordered sequence of byte
+        pairs.  Reading that sequence instead of ``response.headers`` keeps
+        duplicate fields and the server's original header-name casing.
+        """
+        captured: list[dict[str, str]] = []
+        redactions: list[dict[str, Any]] = []
+        for index, pair in enumerate(getattr(response, "raw_headers", ())):
+            try:
+                raw_name, raw_value = pair
+            except (TypeError, ValueError):
+                continue
+            name = cls._decode_raw_header_part(raw_name)
+            value = cls._decode_raw_header_part(raw_value)
+            if cls._is_sensitive_response_header(name):
+                value = _REDACTED_HEADER_VALUE
+                redactions.append({
+                    "index": index,
+                    "name": name,
+                    "reason": "sensitive credential/cookie header",
+                    "replacement": _REDACTED_HEADER_VALUE,
+                })
+            captured.append({"name": name, "value": value})
+        return captured, redactions
 
     def _extract_upstream_request_id(self, headers: Any) -> str | None:
         """Return a provider request id from common response header names."""
@@ -564,76 +837,171 @@ class LLMBenchmarker:
         return None
     
     async def _execute_warmup(self, session: aiohttp.ClientSession) -> None:
-        """Execute warmup requests to initialize the model."""
+        """Execute warmup requests with at most ``concurrency`` in flight."""
         self.console.print()
         self.console.print(Panel(
             f"[yellow]Warm-up Phase: Sending {self.config.warmup_requests} requests to initialize model...[/yellow]",
             title="Warm-up",
             border_style="yellow"
         ))
-        
-        warmup_tasks = []
-        for _ in range(self.config.warmup_requests):
-            # Each warmup request gets its own unique payload
-            task = self._make_request(session, is_warmup=True)
-            warmup_tasks.append(task)
-        
-        # Execute warmup requests
-        completed = 0
-        with Progress() as progress:
+        remaining = self.config.warmup_requests
+
+        with Progress(disable=not self.config.show_progress) as progress:
             task = progress.add_task("[yellow]Warming up...", total=self.config.warmup_requests)
-            
-            for coro in asyncio.as_completed(warmup_tasks):
-                await coro
-                completed += 1
-                progress.update(task, advance=1)
-        
+
+            async def warmup_worker() -> None:
+                nonlocal remaining
+                while remaining > 0:
+                    remaining -= 1
+                    await self._make_request(session, is_warmup=True)
+                    progress.update(task, advance=1)
+
+            workers = min(self.config.concurrency, self.config.warmup_requests)
+            await asyncio.gather(*(warmup_worker() for _ in range(workers)))
+
         self.console.print("[green]✓ Warm-up complete![/green]")
         await asyncio.sleep(1)  # Brief pause after warmup
-    
-    async def _worker(
+
+    def _build_schedule(self) -> ArrivalSchedule:
+        return build_schedule(
+            self.config.arrival_mode,
+            requests=self.config.total_requests,
+            concurrency=self.config.concurrency,
+            rate=self.config.arrival_rate,
+            shape=self.config.arrival_shape,
+            seed=self.config.arrival_seed,
+            duration_seconds=self.config.duration_seconds,
+            replay_file=self.config.replay_file,
+        )
+
+    async def _closed_worker(
         self,
         session: aiohttp.ClientSession,
+        scenario_start: float,
+        deadline: float | None,
         progress: Progress,
-        progress_task: TaskID
+        progress_task: TaskID,
     ) -> None:
-        """Worker coroutine that runs requests with rate limiting."""
-        while True:
+        """One of C closed-loop workers: send the next request when the last ends."""
+        rate = self.config.target_rps
+        while deadline is None or time.monotonic() < deadline:
             request_id = await self._claim_request_id()
             if request_id is None:
                 break
-
-            # Rate limiting
+            # With a rate cap the intended send time is known, so the delay a
+            # slow response imposes on later requests can be measured.
+            scheduled = scenario_start + (request_id - 1) / rate if rate > 0 else None
             await self.rate_limiter.acquire()
+            metrics = await self._make_request(
+                session, request_id=request_id, scheduled_time=scheduled
+            )
+            self.result.add_request(metrics)
+            progress.update(progress_task, advance=1)
 
-            # Execute request with concurrency control (each gets unique payload)
-            async with self.semaphore:
-                metrics = await self._make_request(session, request_id=request_id)
-                self.result.add_request(metrics)
-                progress.update(progress_task, advance=1)
-    
+    async def _run_open_loop(
+        self,
+        session: aiohttp.ClientSession,
+        schedule: ArrivalSchedule,
+        scenario_start: float,
+        progress: Progress,
+        progress_task: TaskID,
+    ) -> None:
+        """Send each request at its precomputed time regardless of earlier ones."""
+
+        async def send(index: int, scheduled: float) -> None:
+            fixture_id = schedule.fixture_ids[index] if schedule.fixture_ids else None
+            metrics = await self._make_request(
+                session, request_id=index + 1, scheduled_time=scheduled, fixture_id=fixture_id
+            )
+            self.result.add_request(metrics)
+            progress.update(progress_task, advance=1)
+
+        tasks: list[asyncio.Task[None]] = []
+        for index, offset in enumerate(schedule.offsets):
+            scheduled = scenario_start + offset
+            delay = scheduled - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            tasks.append(asyncio.create_task(send(index, scheduled)))
+        await asyncio.gather(*tasks)
+
+    def _make_connector(self, open_loop: bool) -> aiohttp.TCPConnector:
+        # Keep-alive by default: a pool sized to the closed-loop concurrency
+        # (unbounded for open loop, which must never queue in the client).
+        limit = 0 if open_loop else max(1, self.config.concurrency)
+        return aiohttp.TCPConnector(
+            limit=limit,
+            limit_per_host=limit,
+            force_close=self.config.cold_connections,
+            ssl=self.config.ssl_option(),
+        )
+
     async def run(self) -> BenchmarkResult:
         """Execute the full benchmark."""
         url = f"{self.config.endpoint}/{self.config.api_route}"
+        schedule = self._build_schedule()
+        self.schedule = schedule
+        self.result.arrival_mode = schedule.mode
+        self.result.arrival_schedule = schedule.to_dict()
+        if self.config.schedule_log_path:
+            from pathlib import Path
+
+            schedule.write_jsonl(Path(self.config.schedule_log_path))
+        if schedule.mode == "burst":
+            self.result.total_requests = len(schedule)
         self.console.print(Panel(
             f"[cyan]Target: {url}\n"
             f"Model: {self.config.model}\n"
-            f"Concurrency: {self.config.concurrency}\n"
+            f"Arrival: {schedule.mode}"
+            + (f" @ {schedule.rate}/s" if schedule.rate else "")
+            + f"\nConcurrency: {self.config.concurrency}\n"
             f"Target RPS: {'Unlimited' if self.config.target_rps <= 0 else self.config.target_rps}\n"
-            f"Total Requests: {self.config.total_requests}[/cyan]",
+            f"Total Requests: "
+            f"{len(schedule) if schedule.open_loop else self.config.total_requests}"
+            + (f"\nDuration: {self.config.duration_seconds}s" if self.config.duration_seconds else "")
+            + "[/cyan]",
             title="Benchmark Configuration",
             border_style="cyan"
         ))
-        
-        # Create HTTP session
-        connector = aiohttp.TCPConnector(
-            limit=self.config.concurrency * 2,
-            limit_per_host=self.config.concurrency * 2,
-            enable_cleanup_closed=True,
-            force_close=True
+
+        if not self.config.tls_verify:
+            self.console.print(
+                "[bold yellow]TLS certificate verification is OFF for "
+                f"{self.config.endpoint}: traffic, including the API key, can be "
+                "intercepted.[/bold yellow]"
+            )
+        capacity = (
+            measure_event_capacity(self._selfcheck_parser()) if self.config.self_check else None
         )
-        
-        async with aiohttp.ClientSession(connector=connector) as session:
+        connector = self._make_connector(schedule.open_loop)
+
+        # Monitoring (probes, /metrics, Cloud Eye) uses its own pool so it never
+        # waits behind, or takes a connection from, the measured requests.
+        async with aiohttp.ClientSession(connector=connector) as session, \
+                aiohttp.ClientSession(
+                    connector=aiohttp.TCPConnector(ssl=self.config.ssl_option())
+                ) as monitor_session:
+            server_probe = await probe_server(
+                monitor_session, self.config.endpoint, self.config.api_key
+            )
+            handler = self.config.modality_handler
+            fixture_file = str(handler.path) if isinstance(handler, FixtureHandler) else None
+            self.result.manifest = build_manifest(
+                endpoint=self.config.endpoint,
+                api_route=self.config.api_route,
+                model=self.config.model,
+                server_probe=server_probe,
+                schedule=schedule.to_dict(),
+                fixture_file=fixture_file,
+                fixture_manifest_sha256=(
+                    handler.manifest_sha256() if isinstance(handler, FixtureHandler) else None
+                ),
+                tokenizer=self.config.tokenizer,
+                image_digest=self.config.image_digest,
+                config_snapshot=self.config.snapshot(),
+                endpoint_label=self.config.endpoint_label,
+            )
+
             # Warmup phase
             if self.config.warmup_requests > 0:
                 await self._execute_warmup(session)
@@ -652,12 +1020,23 @@ class LLMBenchmarker:
                         strict=self.config.metrics_strict,
                     )
                 )
-                await server_collector.start(session)
+                await server_collector.start(monitor_session)
+
+            lag_monitor = LagMonitor()
+            if self.config.start_gate is not None:
+                scenario_start = await self.config.start_gate.wait()
+            else:
+                scenario_start = time.monotonic()
+            lag_monitor.start()
 
             # Only the measured request interval contributes to aggregate throughput.
-            self.result.scenario_start_monotonic = time.monotonic()
+            self.result.scenario_start_monotonic = scenario_start
             self.result.start_time = datetime.now()
             scenario_start_epoch_ms = int(time.time() * 1000)
+            deadline = (
+                scenario_start + self.config.duration_seconds
+                if self.config.duration_seconds else None
+            )
             
             self.console.print()
             self.console.print(Panel(
@@ -667,26 +1046,39 @@ class LLMBenchmarker:
             ))
             
             # Main benchmark with progress tracking
-            with Progress() as progress:
+            with Progress(disable=not self.config.show_progress) as progress:
                 task = progress.add_task(
                     "[green]Executing requests...",
-                    total=self.config.total_requests
+                    total=(
+                        len(schedule) if schedule.open_loop
+                        else None if deadline else self.config.total_requests
+                    ),
                 )
                 
-                # Create worker tasks
-                workers = [
-                    self._worker(session, progress, task)
-                    for _ in range(self.config.concurrency)
-                ]
-                
                 try:
-                    # Run all workers
-                    await asyncio.gather(*workers)
+                    if schedule.open_loop:
+                        await self._run_open_loop(session, schedule, scenario_start, progress, task)
+                    else:
+                        await asyncio.gather(*(
+                            self._closed_worker(session, scenario_start, deadline, progress, task)
+                            for _ in range(self.config.concurrency)
+                        ))
                 finally:
                     self.result.end_time = datetime.now()
                     scenario_end_epoch_ms = int(time.time() * 1000)
+                    await lag_monitor.stop()
+                    if capacity is not None:
+                        self.result.client_self_check = build_report(
+                            capacity,
+                            lag_monitor.lags_ms,
+                            peak_event_rate(
+                                (record.t, record.events)
+                                for metric in self.result.request_metrics
+                                for record in metric.chunk_records
+                            ),
+                        )
                     if server_collector is not None:
-                        await server_collector.stop(session)
+                        await server_collector.stop(monitor_session)
                         self.result.server_metrics = server_collector.to_dict(
                             self.result.scenario_start_monotonic
                         )
@@ -695,7 +1087,7 @@ class LLMBenchmarker:
                             self.config.modelarts_cloud_eye
                         )
                         self.result.provider_monitoring = await cloud_eye_collector.collect(
-                            session,
+                            monitor_session,
                             scenario_start_epoch_ms,
                             scenario_end_epoch_ms,
                         )

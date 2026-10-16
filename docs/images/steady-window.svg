@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 330" width="760" height="330" role="img" aria-labelledby="title desc">
+<title id="title">In-flight timeline</title><desc id="desc">Step line of requests in flight with the steady window shaded.</desc>
+<style>
+  svg { --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+        --grid:#e1e0d9; --axis:#c3c2b7; --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a;
+        --band:rgba(42,120,214,0.10); --box:#f3f2ee; --ring:rgba(11,11,11,0.10); }
+  @media (prefers-color-scheme: dark) {
+    svg { --surface:#1a1a19; --ink:#f0efec; --ink2:#c3c2b7; --muted:#898781;
+          --grid:#2c2c2a; --axis:#383835; --s1:#3987e5; --s2:#d95926; --s3:#199e70;
+          --band:rgba(57,135,229,0.16); --box:#242422; --ring:rgba(255,255,255,0.10); }
+  }
+  text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; fill: var(--ink); }
+  .t { font-size: 15px; font-weight: 600; }
+  .l { font-size: 12.5px; fill: var(--ink2); }
+  .m { font-size: 11.5px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+  .b { font-size: 12.5px; font-weight: 600; }
+  .grid { stroke: var(--grid); stroke-width: 1; }
+  .axis { stroke: var(--axis); stroke-width: 1; }
+  .box { fill: var(--box); stroke: var(--ring); stroke-width: 1; }
+  .arrow { stroke: var(--ink2); stroke-width: 1.5; fill: none; marker-end: url(#ah); }
+  .dim { stroke: var(--ink2); stroke-width: 1; fill: none; }
+</style>
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+  orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--ink2)"/></marker></defs>
+<rect width="760" height="330" rx="8" style="fill:var(--surface)"/>
+<text x="24.0" y="32.0" class="t" text-anchor="start" >Requests in flight, Qwen3-30B-A3B run r1 (C = 4)</text>
+<text x="24.0" y="52.0" class="l" text-anchor="start" >Steady-state throughput counts only tokens that arrive while all 4 slots are busy.</text>
+<line x1="70" y1="270.0" x2="730" y2="270.0" class="grid"/>
+<text x="62.0" y="274.0" class="m" text-anchor="end" >0</text>
+<line x1="70" y1="232.0" x2="730" y2="232.0" class="grid"/>
+<text x="62.0" y="236.0" class="m" text-anchor="end" >1</text>
+<line x1="70" y1="194.0" x2="730" y2="194.0" class="grid"/>
+<text x="62.0" y="198.0" class="m" text-anchor="end" >2</text>
+<line x1="70" y1="156.0" x2="730" y2="156.0" class="grid"/>
+<text x="62.0" y="160.0" class="m" text-anchor="end" >3</text>
+<line x1="70" y1="118.0" x2="730" y2="118.0" class="grid"/>
+<text x="62.0" y="122.0" class="m" text-anchor="end" >4</text>
+<line x1="70" y1="80.0" x2="730" y2="80.0" class="grid"/>
+<text x="62.0" y="84.0" class="m" text-anchor="end" >5</text>
+<text x="70.0" y="288.0" class="m" text-anchor="middle" >0</text>
+<text x="202.0" y="288.0" class="m" text-anchor="middle" >5</text>
+<text x="334.0" y="288.0" class="m" text-anchor="middle" >10</text>
+<text x="466.0" y="288.0" class="m" text-anchor="middle" >15</text>
+<text x="598.0" y="288.0" class="m" text-anchor="middle" >20</text>
+<text x="730.0" y="288.0" class="m" text-anchor="middle" >25</text>
+<line x1="70" y1="270" x2="730" y2="270" class="axis"/>
+<text x="400.0" y="308.0" class="m" text-anchor="middle" >seconds since start</text>
+<text x="30.0" y="68.0" class="m" text-anchor="start" >in flight</text>
+<rect x="70.2" y="80" width="533.1" height="190" style="fill:var(--band)"/>
+<text x="336.7" y="96.0" class="b" text-anchor="middle" >steady window 20.2 s · 197 tok/s</text>
+<path d="M70.0,270.0 L70.0,270.0 L70.0,232.0 L70.0,232.0 L70.0,194.0 L70.0,194.0 L70.0,156.0 L70.1,156.0 L70.1,118.0 L207.2,118.0 L207.2,156.0 L207.2,156.0 L207.2,118.0 L211.2,118.0 L211.2,156.0 L211.2,156.0 L211.2,118.0 L212.4,118.0 L212.4,156.0 L212.4,156.0 L212.4,118.0 L218.2,118.0 L218.2,156.0 L218.2,156.0 L218.2,118.0 L340.0,118.0 L340.0,156.0 L340.0,156.0 L340.0,118.0 L340.9,118.0 L340.9,156.0 L340.9,156.0 L340.9,118.0 L345.7,118.0 L345.7,156.0 L345.7,156.0 L345.7,118.0 L353.8,118.0 L353.8,156.0 L353.8,156.0 L353.8,118.0 L473.3,118.0 L473.3,156.0 L473.3,156.0 L473.3,118.0 L474.0,118.0 L474.0,156.0 L474.0,156.0 L474.0,118.0 L482.1,118.0 L482.1,156.0 L482.2,156.0 L482.2,118.0 L482.5,118.0 L482.5,156.0 L482.5,156.0 L482.5,118.0 L603.1,118.0 L603.1,156.0 L604.0,156.0 L604.0,194.0 L616.9,194.0 L616.9,232.0 L666.0,232.0 L666.0,270.0" style="fill:none;stroke:var(--s1);stroke-width:2"/>
+<text x="662.0" y="262.0" class="m" text-anchor="end" >full window 22.6 s · 181 tok/s</text>
+</svg>

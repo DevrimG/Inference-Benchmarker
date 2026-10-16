@@ -10,7 +10,7 @@ import aiohttp
 from aiohttp import web
 from openpyxl import load_workbook
 
-from llm_load_tester.benchmarker import LLMBenchmarker, LoadTestConfig, SSEDecoder
+from llm_load_tester.benchmarker import AsyncRateLimiter, LLMBenchmarker, LoadTestConfig, SSEDecoder
 from llm_load_tester.metrics import ErrorCategory
 from llm_load_tester.modelarts_monitoring import (
     ModelArtsCloudEyeCollector,
@@ -48,6 +48,7 @@ class BenchmarkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         app = web.Application()
         app.router.add_post("/stream", self._stream)
         app.router.add_post("/buffered", self._buffered)
+        app.router.add_post("/error", self._error)
         app.router.add_post("/scenario", self._scenario)
         app.router.add_get("/metrics", self._metrics)
         app.router.add_post(
@@ -91,6 +92,10 @@ class BenchmarkIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "X-Span-Id": "span-1",
             }
         )
+        response.headers.add("X-Duplicate", "first")
+        response.headers.add("x-duplicate", "second")
+        response.headers.add("Authorization", "Bearer response-secret")
+        response.headers.add("Set-Cookie", "session=response-secret")
         await response.prepare(request)
         await response.write(b": heartbeat\n\n")
         await self._write_event(response, {
@@ -141,6 +146,16 @@ class BenchmarkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             },
             headers={"X-Request-Id": "buffered-1", "X-Span-Id": "buffered-span"},
         )
+
+    async def _error(self, request: web.Request) -> web.Response:
+        response = web.Response(
+            status=429,
+            text="too many requests",
+            headers={"X-Error-Info": "retry-later"},
+        )
+        response.headers.add("x-error-info", "preserve-this-duplicate")
+        response.headers.add("X-API-Key", "error-secret")
+        return response
 
     async def _scenario(self, request: web.Request) -> web.StreamResponse:
         self.state["running"] += 1
@@ -214,7 +229,9 @@ vllm:time_to_first_token_seconds_count{{model_name="mock-model"}} {state['ttft_c
         })
 
     async def test_streaming_response_reports_ttft_and_true_ttfb(self) -> None:
-        benchmarker = LLMBenchmarker(self._config("stream", total_requests=1))
+        benchmarker = LLMBenchmarker(
+            self._config("stream", total_requests=1, api_key="request-secret")
+        )
         async with aiohttp.ClientSession() as session:
             metric = await benchmarker._make_request(session, request_id=1)
 
@@ -242,6 +259,27 @@ vllm:time_to_first_token_seconds_count{{model_name="mock-model"}} {state['ttft_c
         self.assertAlmostEqual(metric.provider_stream_return_span, 0.03)
         self.assertEqual(metric.provider_usage["completion_tokens_details"]["reasoning_tokens"], 2)
         self.assertEqual(metric.finish_reason, "stop")
+        self.assertEqual(
+            [header for header in metric.response_headers if header["name"].lower() == "x-duplicate"],
+            [
+                {"name": "X-Duplicate", "value": "first"},
+                {"name": "x-duplicate", "value": "second"},
+            ],
+        )
+        self.assertEqual(
+            [header for header in metric.response_headers if header["name"].lower() in {"authorization", "set-cookie"}],
+            [
+                {"name": "Authorization", "value": "[REDACTED]"},
+                {"name": "Set-Cookie", "value": "[REDACTED]"},
+            ],
+        )
+        self.assertEqual(
+            [redaction["name"] for redaction in metric.response_header_redactions],
+            ["Authorization", "Set-Cookie"],
+        )
+        serialized = json.dumps(metric.to_dict())
+        self.assertNotIn("request-secret", serialized)
+        self.assertNotIn("response-secret", serialized)
         benchmarker.result.add_request(metric)
         summary = benchmarker.result.get_summary()
         self.assertEqual(summary["total_reasoning_tokens"], 2)
@@ -260,6 +298,26 @@ vllm:time_to_first_token_seconds_count{{model_name="mock-model"}} {state['ttft_c
         self.assertEqual(metric.available_responsiveness_metrics, ["ttfb"])
         self.assertEqual(metric.tokens_generated, 2)
         self.assertEqual(metric.upstream_span_id, "buffered-span")
+
+    async def test_error_response_captures_ordered_headers_and_redacts_credentials(self) -> None:
+        benchmarker = LLMBenchmarker(self._config("error", total_requests=1))
+        async with aiohttp.ClientSession() as session:
+            metric = await benchmarker._make_request(session, request_id=1)
+
+        self.assertEqual(metric.error, ErrorCategory.RATE_LIMIT)
+        self.assertEqual(metric.status_code, 429)
+        self.assertEqual(
+            [header for header in metric.response_headers if header["name"].lower() == "x-error-info"],
+            [
+                {"name": "X-Error-Info", "value": "retry-later"},
+                {"name": "x-error-info", "value": "preserve-this-duplicate"},
+            ],
+        )
+        self.assertEqual(
+            [header for header in metric.response_headers if header["name"].lower() == "x-api-key"],
+            [{"name": "X-API-Key", "value": "[REDACTED]"}],
+        )
+        self.assertEqual(metric.response_header_redactions[0]["name"], "X-API-Key")
 
     async def test_modelarts_cloud_eye_adapter_is_separate_and_normalizes_latency(self) -> None:
         collector = ModelArtsCloudEyeCollector(ModelArtsCloudEyeConfig(
@@ -335,6 +393,8 @@ vllm:time_to_first_token_seconds_count{{model_name="mock-model"}} {state['ttft_c
             exported = json.loads(json_path.read_text())
             self.assertIn("server_metrics", exported)
             self.assertIn("provider_monitoring", exported)
+            self.assertIn("response_headers", exported["raw_metrics"][0])
+            self.assertEqual(exported["raw_metrics"][0]["response_header_redactions"], [])
             self.assertEqual(
                 exported["summary_units"]["client_observed_ttft_min"],
                 "seconds",
@@ -358,6 +418,15 @@ vllm:time_to_first_token_seconds_count{{model_name="mock-model"}} {state['ttft_c
                 ],
             )
             self.assertEqual(workbook["Requests"].max_row, 3)
+            request_headers = list(
+                workbook["Requests"].iter_rows(min_row=1, max_row=1, values_only=True)
+            )[0]
+            self.assertIn("response_headers", request_headers)
+            response_headers_column = request_headers.index("response_headers")
+            first_request = list(
+                workbook["Requests"].iter_rows(min_row=2, max_row=2, values_only=True)
+            )[0]
+            self.assertIn('"name": "Content-Type"', first_request[response_headers_column])
             benchmark_rows = {
                 row[0]: row[1:]
                 for row in workbook["Benchmark Summary"].iter_rows(
@@ -418,6 +487,24 @@ vllm:time_to_first_token_seconds_count{{model_name="mock-model"}} {state['ttft_c
         events.extend(decoder.feed(encoded[-2:]))
         events.extend(decoder.finalize())
         self.assertEqual(events, ['{"text":"ı"}\nsecond'])
+
+
+class RateLimiterTimingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_waited_time_is_not_credited_twice(self) -> None:
+        limiter = AsyncRateLimiter(4)
+        loop = asyncio.get_running_loop()
+        acquired = []
+
+        async def acquire() -> None:
+            await limiter.acquire()
+            acquired.append(loop.time())
+
+        started = loop.time()
+        await asyncio.gather(*(acquire() for _ in range(6)))
+        # Four initial tokens may burst, then each additional token must wait
+        # roughly a quarter-second instead of being emitted as a pair.
+        self.assertGreaterEqual(acquired[-1] - started, 0.45)
+        self.assertGreaterEqual(acquired[-1] - acquired[-2], 0.20)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-# Multi-Modal LLM Benchmark
+# Inference Benchmarker
 
 An asynchronous load tester for OpenAI-compatible LLM APIs (ModelArts MaaS,
 ModelArts Real-Time Inference, vLLM and others) across text, image and voice

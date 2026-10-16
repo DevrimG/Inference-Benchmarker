@@ -295,6 +295,8 @@ class LLMBenchmarker:
         self.schedule: ArrivalSchedule | None = None
         self._tokenizer: Any = None
         self._tokenizer_failed = False
+        self.stream_usage = config.stream_usage
+        self.result.stream_usage_effective = config.stream_usage
         if config.stream_usage not in {"continuous", "final", "off"}:
             raise ValueError("stream_usage must be 'continuous', 'final' or 'off'")
 
@@ -488,6 +490,14 @@ class LLMBenchmarker:
                         raw_response.extend(raw_chunk)
                     metrics.error = ErrorCategory.from_status_code(response.status)
                     metrics.error_message = raw_response.decode("utf-8", errors="replace")[:200]
+                    if (
+                        response.status == 400
+                        and self.stream_usage == "continuous"
+                        and "continuous_usage_stats" in raw_response.decode("utf-8", "replace")
+                    ):
+                        # The server rejects running usage; keep final usage only.
+                        self.stream_usage = "final"
+                        self.result.stream_usage_effective = "final (continuous rejected by server)"
                     metrics.end_time = time.monotonic()
                     return metrics
 
@@ -679,11 +689,11 @@ class LLMBenchmarker:
 
     def _apply_stream_usage(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Ask streaming servers for usage (and running usage) in the stream."""
-        if self.config.stream_usage == "off" or not payload.get("stream"):
+        if self.stream_usage == "off" or not payload.get("stream"):
             return payload
         options = dict(payload.get("stream_options") or {})
         options.setdefault("include_usage", True)
-        if self.config.stream_usage == "continuous":
+        if self.stream_usage == "continuous":
             options.setdefault("continuous_usage_stats", True)
         return {**payload, "stream_options": options}
 

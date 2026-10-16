@@ -1,7 +1,7 @@
-"""Multi-Modal LLM Benchmark package."""
+"""Inference Benchmarker package."""
 
 __version__ = "1.3.1"
-__author__ = "Multi-Modal LLM Benchmark"
+__author__ = "Inference Benchmarker"
 
 from .benchmarker import LLMBenchmarker, LoadTestConfig, StartGate
 from .metrics import BenchmarkResult, ChunkRecord, RequestMetrics, ErrorCategory

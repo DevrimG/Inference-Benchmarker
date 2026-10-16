@@ -67,7 +67,7 @@ def print_header() -> None:
     """Print the application header."""
     console.print()
     console.print(Panel.fit(
-        "[bold cyan]Multi-Modal LLM Benchmark[/bold cyan]\n"
+        "[bold cyan]Inference Benchmarker[/bold cyan]\n"
         "[dim]Asynchronous benchmarking tool for LLM APIs[/dim]",
         border_style="cyan"
     ))

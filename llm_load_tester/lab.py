@@ -30,6 +30,9 @@ class EndpointSpec:
     weight: float = 1.0
     api_key: str | None = None
     metrics_api_key: str | None = None
+    tls_verify: bool = True
+    tls_ca_file: str | None = None
+    tls_check_hostname: bool = True
 
 
 def split_concurrency(total: int, weights: Sequence[float]) -> list[int]:
@@ -104,6 +107,9 @@ async def run_fanout(
             arrival_seed=None if base.arrival_seed is None else base.arrival_seed + index,
             replay_file=replay_parts[index] if replay_parts else base.replay_file,
             endpoint_label=spec.label,
+            tls_verify=spec.tls_verify,
+            tls_ca_file=spec.tls_ca_file,
+            tls_check_hostname=spec.tls_check_hostname,
             start_gate=gate,
             schedule_log_path=(
                 str(schedule_dir / f"schedule_{spec.label}.jsonl") if schedule_dir else None

@@ -168,13 +168,14 @@ class MockOpenAIServer:
         app.router.add_get("/_mock/records", self._records)
         return app
 
-    async def start(self) -> str:
+    async def start(self, ssl_context: Any = None) -> str:
         self._runner = web.AppRunner(self.app())
         await self._runner.setup()
-        site = web.TCPSite(self._runner, "127.0.0.1", 0)
+        site = web.TCPSite(self._runner, "127.0.0.1", 0, ssl_context=ssl_context)
         await site.start()
         port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
-        self.url = f"http://127.0.0.1:{port}"
+        scheme = "https" if ssl_context is not None else "http"
+        self.url = f"{scheme}://127.0.0.1:{port}"
         return self.url
 
     async def stop(self) -> None:

@@ -198,6 +198,21 @@ Several `[[endpoints]]` fan out with a weighted concurrency split, one shared
 start instant and time origin; merged records carry an `endpoint` column.
 Credentials come from the environment variables named in the config.
 
+Endpoints with a self-signed certificate (common for IP-addressed ModelArts
+real-time services) are rejected by default. Prefer pinning the certificate:
+
+```bash
+openssl s_client -connect HOST:443 </dev/null 2>/dev/null | openssl x509 > certs/endpoint.pem
+```
+
+then set `tls_ca_file = "certs/endpoint.pem"` and, if the certificate names no
+host, `tls_check_hostname = false` on that `[[endpoints]]` entry. Only that
+certificate is then accepted. Compare its fingerprint
+(`openssl x509 -in certs/endpoint.pem -noout -fingerprint -sha256`) with one
+obtained another way if you can. `tls_verify = false` accepts any certificate
+and should be limited to short-lived keys. Both settings are recorded in the
+run manifest.
+
 ### Measurement semantics
 
 - Arrival modes: `closed` (C workers), `poisson` / `gamma` (open loop at a
